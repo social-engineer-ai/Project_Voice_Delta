@@ -44,7 +44,7 @@ async def handle_message_intent(
             )
             return
 
-        if not intent.content:
+        if not intent.message_body:
             await update.message.reply_text(
                 f"{intent.recipient_name} ko kya message bhejna hai?"
             )
@@ -81,10 +81,10 @@ async def handle_message_intent(
         channel = intent.channel or "whatsapp"
 
         if channel == "sms":
-            link = _sms_link(contact.phone, intent.content)
+            link = _sms_link(contact.phone, intent.message_body)
             channel_label = "SMS"
         else:
-            link = _whatsapp_link(contact.phone, intent.content)
+            link = _whatsapp_link(contact.phone, intent.message_body)
             channel_label = "WhatsApp"
 
         # Save task
@@ -97,7 +97,7 @@ async def handle_message_intent(
                 "recipient_name": contact.name,
                 "recipient_phone": contact.phone,
                 "channel": channel,
-                "content": intent.content,
+                "message_body": intent.message_body,
             },
         )
         db.add(task)
@@ -110,7 +110,7 @@ async def handle_message_intent(
 
         await update.message.reply_text(
             f"*{contact.name}* ko {channel_label} message:\n\n"
-            f"_{intent.content}_\n\n"
+            f"_{intent.message_body}_\n\n"
             f"Tap karke bhejiye.",
             reply_markup=InlineKeyboardMarkup(buttons),
             parse_mode="Markdown",

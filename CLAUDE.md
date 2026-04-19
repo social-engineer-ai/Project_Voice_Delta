@@ -71,6 +71,34 @@ Currently runs locally via `python -m app.main` with SQLite. For the India deplo
 - Use AWS Activate credits for infrastructure
 - Add monitoring for API error rates, ASR accuracy samples, intent classification distributions
 
+## Hooks
+
+`.claude/settings.json` registers a `PostToolUse` hook on `Write|Edit`
+that runs `tests/test_schema_cleaner.py` whenever `app/services/classify.py`
+changes. The filename filter lives in the helper script at
+`.claude/hooks/schema_cleaner_check.py`, not the matcher, so the hook
+exits cheaply (~50ms) for unrelated edits. The invariant it protects:
+the Pydantic-to-Gemini schema cleaner stays green. Without this, a
+classifier edit can silently break response-schema generation and every
+real classification call fails at runtime (see commit `90c9e6c` for the
+original incident).
+
+Behavior:
+- Match: `app/services/classify.py` (path suffix; Windows backslashes normalized).
+- Timeout: 10 seconds. On timeout the hook logs a warning and exits 0
+  rather than blocking; the cleaner test should finish in under a
+  second, so a timeout implies something larger is wrong.
+- Success: silent exit 0. A success line on every edit would be noisy.
+- Failure: exit 2 with stdout+stderr captured on stderr so Claude sees
+  the test output as feedback.
+
+Interpreter: the committed command uses `venv/Scripts/python.exe`,
+which is AV's Windows venv layout. On macOS/Linux or a different venv
+path, override the interpreter path via `.claude/settings.local.json`
+(which is not checked in) rather than editing `settings.json`. The
+hook script itself uses `sys.executable` for the subprocess, so only
+the outer invocation needs environment tweaking.
+
 ## Who to ask
 
 Product decisions: AV

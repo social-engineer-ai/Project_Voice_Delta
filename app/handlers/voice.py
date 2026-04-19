@@ -129,9 +129,33 @@ async def handle_voice_message(
 
         # Step 4: Classify intent
         intent = classify_intent(transcript)
+
+        # Exactly one of message_body / reminder_text / task_description
+        # should be set (one per intent); zero is expected for call/unknown;
+        # more than one is spillover and worth flagging so we can correlate
+        # the pattern back to specific utterances.
+        body_fields = {
+            "message_body": intent.message_body,
+            "reminder_text": intent.reminder_text,
+            "task_description": intent.task_description,
+        }
+        populated = [name for name, value in body_fields.items() if value]
+        if len(populated) > 1:
+            logger.warning(
+                "Spillover: intent=%s, populated=%s, transcript=%r",
+                intent.intent,
+                populated,
+                transcript,
+            )
+            body_label = "spillover"
+        elif len(populated) == 1:
+            body_label = populated[0]
+        else:
+            body_label = "none"
+
         logger.info(
             f"Intent: {intent.intent} (confidence {intent.confidence:.2f}) - "
-            f"recipient={intent.recipient_name}, content={intent.content}"
+            f"recipient={intent.recipient_name}, body={body_label}"
         )
 
         if intent.confidence < 0.5 or intent.intent == "unknown":

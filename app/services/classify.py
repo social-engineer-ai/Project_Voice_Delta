@@ -95,9 +95,17 @@ class IntentClassification(BaseModel):
         default=None,
         description="For 'message' intent: 'whatsapp', 'sms', 'telegram', or null if unspecified."
     )
-    content: Optional[str] = Field(
+    message_body: Optional[str] = Field(
         default=None,
-        description="The message body, reminder text, or task description. For 'call', null."
+        description="For 'message' intent only: the text to send to the recipient, as spoken. Null for every other intent."
+    )
+    reminder_text: Optional[str] = Field(
+        default=None,
+        description="For 'reminder' intent only: what the shopkeeper wants to be reminded about. Null for every other intent."
+    )
+    task_description: Optional[str] = Field(
+        default=None,
+        description="For 'delegate' intent only: the task the recipient is being asked to do, as spoken. Null for every other intent."
     )
     scheduled_time: Optional[str] = Field(
         default=None,
@@ -128,14 +136,14 @@ The shopkeeper will speak one of four kinds of commands:
    - "Rajesh ko WhatsApp karo, kal delivery aayegi"
    - "Send message to supplier, cement price confirm karo"
    - "Ramu ko bolo kaam jaldi khatam kare"
-   Output: intent=message, recipient_name, channel (if mentioned), content
+   Output: intent=message, recipient_name, channel (if mentioned), message_body
 
 2. REMINDER: Set a reminder for yourself.
    Examples:
    - "3 baje yaad dilana Sharma ji ko call karna hai"
    - "Kal subah reminder lagana bank jaana hai"
    - "30 minute baad yaad dilana"
-   Output: intent=reminder, content, scheduled_time, recipient_name (if the reminder is about a person)
+   Output: intent=reminder, reminder_text, scheduled_time, recipient_name (if the reminder is about a person)
 
 3. DELEGATE: Tell someone to do something (a task that another person should do).
    Examples:
@@ -143,7 +151,7 @@ The shopkeeper will speak one of four kinds of commands:
    - "Tell the driver to reach the site by 10 AM"
    - "Servant ko bolo godown check kare"
    Output: intent=delegate, recipient_name (who should do the task),
-           content (what they should do), followup_check (what to verify later)
+           task_description (what they should do), followup_check (what to verify later)
 
 4. CALL: Initiate a phone call to someone.
    Examples:
@@ -162,6 +170,9 @@ Important rules:
   "thodi der mein" = in a little while (treat as 30 min), "shaam ko" = evening (6 PM).
 - If the user mixes intents in one utterance, pick the primary one and note the
   rest in clarification_needed.
+- Populate exactly one of message_body, reminder_text, task_description based on
+  the intent. The other two must be null. For 'call' and 'unknown', all three
+  must be null.
 - confidence should reflect how unambiguous the intent is. Below 0.7 means the
   handler will ask for confirmation before acting.
 

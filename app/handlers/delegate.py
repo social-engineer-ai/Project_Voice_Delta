@@ -38,7 +38,7 @@ async def handle_delegate_intent(
     """Handle a delegation command: 'tell Ramu to call Praveen'."""
     db = SessionLocal()
     try:
-        if not intent.recipient_name or not intent.content:
+        if not intent.recipient_name or not intent.task_description:
             await update.message.reply_text(
                 "Kisko bolna hai aur kya karna hai? Dobara bataiye."
             )
@@ -68,7 +68,7 @@ async def handle_delegate_intent(
             return
 
         contact = contacts[0]
-        link = _whatsapp_link(contact.phone, intent.content)
+        link = _whatsapp_link(contact.phone, intent.task_description)
 
         task = Task(
             user_id=user.id,
@@ -78,7 +78,7 @@ async def handle_delegate_intent(
             payload={
                 "recipient_name": contact.name,
                 "recipient_phone": contact.phone,
-                "content": intent.content,
+                "task_description": intent.task_description,
                 "followup_check": intent.followup_check,
             },
         )
@@ -90,7 +90,7 @@ async def handle_delegate_intent(
         followup_time = datetime.now(IST) + timedelta(hours=2)
         followup_text = (
             intent.followup_check
-            or f"Check karo: kya {contact.name} ne kaam kiya? ({intent.content})"
+            or f"Check karo: kya {contact.name} ne kaam kiya? ({intent.task_description})"
         )
 
         scheduler = context.application.bot_data.get("scheduler")
@@ -111,7 +111,7 @@ async def handle_delegate_intent(
         followup_display = followup_time.strftime("%I:%M %p")
         await update.message.reply_text(
             f"*{contact.name}* ko bhejne ke liye:\n\n"
-            f"_{intent.content}_\n\n"
+            f"_{intent.task_description}_\n\n"
             f"⏰ {followup_display} baje yaad dilaunga check karne ke liye.",
             reply_markup=InlineKeyboardMarkup(buttons),
             parse_mode="Markdown",

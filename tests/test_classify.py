@@ -10,10 +10,13 @@ machine-readable JSON report at tests/last_run.json with per-intent,
 per-category, and overall accuracy rollups.
 
 Current contract: only the intent label is hard-asserted. recipient_name
-is loose-asserted when an expected value is provided. confidence,
-clarification_needed, scheduled_time, content, channel, and followup_check
-are reported in the JSON output but not asserted, so we can observe model
-behavior across edge categories before committing to a stricter contract.
+is loose-asserted when an expected value is provided. The three
+intent-scoped body fields (message_body, reminder_text, task_description)
+are loose-asserted for message/delegate/reminder cases via body_passed.
+confidence, clarification_needed, scheduled_time, channel, and
+followup_check are reported in the JSON output but not asserted, so we
+can observe model behavior across edge categories before committing to
+a stricter contract.
 
 Schema friction encountered while writing test cases is logged by hand to
 SCHEMA_NOTES.md at the repo root, not by this runner.
@@ -26,6 +29,15 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Windows terminals default to cp1252 for stdout, which can't encode the
+# Unicode ellipsis we use for body truncation or arbitrary characters
+# that Gemini may emit inside clarification_needed. Reconfigure to UTF-8
+# at module load so the harness runs cleanly on any OS.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
 
 from app.services.classify import classify_intent
 
@@ -43,6 +55,15 @@ CATEGORIES = [
     "ambiguous_clarification",
     "off_topic_no_match",
 ]
+
+
+# Maps the three intents that carry a body to the intent-scoped field
+# that should hold it after the content-split spec (2026-04-19).
+BODY_FIELD_BY_INTENT = {
+    "message": "message_body",
+    "delegate": "task_description",
+    "reminder": "reminder_text",
+}
 
 
 # Each case: {input, categories, expected_intent, expected_recipient (optional)}
@@ -278,6 +299,7 @@ def evaluate_case(case: dict) -> dict:
         "actual": None,
         "intent_passed": False,
         "recipient_passed": None,
+        "body_passed": None,
         "latency_ms": None,
         "error": None,
     }
@@ -295,6 +317,13 @@ def evaluate_case(case: dict) -> dict:
             record["recipient_passed"] = (
                 exp_rec in actual_rec or (actual_rec != "" and actual_rec in exp_rec)
             )
+
+        # Loose-asserted (reported, not gated): for message/delegate/reminder,
+        # verify the corresponding intent-scoped body field is non-empty.
+        body_field = BODY_FIELD_BY_INTENT.get(expected_intent)
+        if body_field is not None:
+            actual_body = getattr(result, body_field, None)
+            record["body_passed"] = bool(actual_body and actual_body.strip())
     except Exception as e:
         record["latency_ms"] = int((time.perf_counter() - t0) * 1000)
         record["error"] = f"{type(e).__name__}: {e}"
@@ -335,6 +364,32 @@ def build_per_category(records: list[dict]) -> dict[str, dict]:
     return rollup
 
 
+def build_body_populated(records: list[dict]) -> dict[str, dict]:
+    """Rollup of body-field population for message/delegate/reminder cases.
+
+    Separate from intent accuracy: a case can have the right intent but miss
+    its body field (or vice versa). Reported but not gated.
+    """
+    rollup: dict[str, dict] = {
+        "message": {"populated": 0, "total": 0},
+        "delegate": {"populated": 0, "total": 0},
+        "reminder": {"populated": 0, "total": 0},
+    }
+    for r in records:
+        intent = r["expected"]["intent"]
+        if intent not in rollup:
+            continue
+        rollup[intent]["total"] += 1
+        if r.get("body_passed") is True:
+            rollup[intent]["populated"] += 1
+    for bucket in rollup.values():
+        bucket["accuracy"] = (
+            round(bucket["populated"] / bucket["total"], 3)
+            if bucket["total"] else 0.0
+        )
+    return rollup
+
+
 def build_overall(records: list[dict]) -> dict:
     count = len(records)
     passed = sum(1 for r in records if r["intent_passed"])
@@ -366,6 +421,21 @@ def print_case_line(i: int, record: dict) -> None:
         pieces.append(f"recipient={recipient}")
     if sched is not None:
         pieces.append(f"sched={sched}")
+
+    # Body indicator: first non-null of the three intent-scoped body fields.
+    # Truncation rule: strip whitespace first, then if > 40 chars keep the
+    # first 39 and append a Unicode ellipsis.
+    body_label = "none"
+    for field in ("message_body", "task_description", "reminder_text"):
+        value = actual.get(field)
+        if value:
+            stripped = value.strip()
+            if len(stripped) > 40:
+                stripped = stripped[:39] + "\u2026"
+            body_label = f'{field}:"{stripped}"'
+            break
+    pieces.append(f"body={body_label}")
+
     pieces.append(f"latency={record['latency_ms']}ms")
     print(f"    {'  '.join(pieces)}")
 
@@ -406,6 +476,15 @@ def print_per_category_block(per_category: dict[str, dict]) -> None:
         print(f"  {name.ljust(width)}  {b['passed']}/{b['count']}  {pct:5.1f}%")
 
 
+def print_body_populated_block(body_rollup: dict[str, dict]) -> None:
+    print("\nBody fields populated:")
+    width = max(len(k) for k in body_rollup)
+    for intent_name in ("message", "delegate", "reminder"):
+        b = body_rollup[intent_name]
+        pct = b["accuracy"] * 100
+        print(f"  {intent_name.ljust(width)}  {b['populated']}/{b['total']}  {pct:5.1f}%")
+
+
 def print_overall_block(overall: dict) -> None:
     pct = overall["accuracy"] * 100
     print(f"\nOverall: {overall['passed']}/{overall['count']} ({pct:.1f}%)")
@@ -424,11 +503,13 @@ def run() -> int:
 
     per_intent = build_per_intent(records)
     per_category = build_per_category(records)
+    body_populated = build_body_populated(records)
     overall = build_overall(records)
 
     print("\n" + "=" * 60)
     print_per_intent_block(per_intent)
     print_per_category_block(per_category)
+    print_body_populated_block(body_populated)
     print_overall_block(overall)
 
     report = {
@@ -436,6 +517,7 @@ def run() -> int:
         "cases": records,
         "per_intent": per_intent,
         "per_category": per_category,
+        "body_populated": body_populated,
         "overall": overall,
     }
     REPORT_PATH.write_text(

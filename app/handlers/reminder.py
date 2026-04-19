@@ -102,7 +102,7 @@ async def handle_reminder_intent(
     """Handle a 'set reminder' command."""
     db = SessionLocal()
     try:
-        if not intent.content:
+        if not intent.reminder_text:
             await update.message.reply_text(
                 "Kya yaad dilana hai? Content bataiye."
             )
@@ -127,7 +127,7 @@ async def handle_reminder_intent(
             task_type="reminder",
             status="scheduled",
             raw_transcript=context.user_data.get("last_transcript"),
-            payload={"content": intent.content},
+            payload={"reminder_text": intent.reminder_text},
             scheduled_at=scheduled,
         )
         db.add(task)
@@ -141,13 +141,13 @@ async def handle_reminder_intent(
                 send_reminder_ping,
                 trigger="date",
                 run_date=scheduled,
-                args=[context.application, user.telegram_chat_id, intent.content, task.id],
+                args=[context.application, user.telegram_chat_id, intent.reminder_text, task.id],
                 id=f"reminder_{task.id}",
             )
 
         display_time = scheduled.strftime("%d %b, %I:%M %p")
         await update.message.reply_text(
-            f"✅ Reminder set: *{display_time}*\n\n_{intent.content}_",
+            f"✅ Reminder set: *{display_time}*\n\n_{intent.reminder_text}_",
             parse_mode="Markdown",
         )
 
