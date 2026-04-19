@@ -40,3 +40,67 @@ Each entry is a small section with:
 - offending utterance: "Driver ko bolo 10 baje site par pahunche"
 - friction: The intent is `delegate`, but the utterance carries a time the delegated party is expected to act by. The schema's `scheduled_time` field is documented as reminder-only ("For 'reminder': ISO 8601 time..."), so there is no clean place to put "10 baje" without overloading `content` or misusing `scheduled_time`. The test today only asserts the intent, but a downstream feature that wants to convert "delegate by X time" into a follow-up reminder cannot rely on a structured time field.
 - suggested direction: either widen `scheduled_time` to apply to both reminder and delegate (with a separate `time_role` field indicating "due_by" vs "fire_at"), or add a dedicated `task_due_time` field on the schema for delegates.
+- update 2026-04-18 (post-fix harness run): the harness empirically confirms this is a broader pattern, not just delegate. See "multi-intent utterances collapse..." entry below for message+reminder and call+reminder cases with the same shape.
+
+---
+
+The following entries were added after the first real end-to-end harness run (2026-04-19T04:09 UTC, 31/32 overall accuracy). They draw on concrete per-case output recorded in `tests/last_run.json` and were observed by reading the run, not by writing new test assertions.
+
+## 2026-04-18: content field systematically underfilled on message and delegate intents
+
+- category: general (spans honorifics, role_only_references, multi_intent_compound, simple_baseline)
+- offending utterances (representative):
+  - "Supplier ko SMS bhejo, cement ka rate kya hai confirm karo" → content=None (body is "cement ka rate kya hai confirm karo")
+  - "Send message to Sharma ji that payment will be done next week" → content=None (body is "payment will be done next week")
+  - "Ramu bhaiya ko bolo godown ki chaabi laao" → content=None (task is "godown ki chaabi laao")
+  - "Naukar ko bolo dukaan band kare" → content=None (task is "dukaan band kare")
+- friction: across 15 message/delegate cases in the run, `content` was populated on zero of them (the only non-null content in the whole run was one reminder). The field description at `app/services/classify.py:44-47` overloads one slot with three distinct purposes ("The message body, reminder text, or task description. For 'call', null.") so the model has no clear signal for when to use it. Downstream handlers will have literally nothing to send or act on.
+- suggested direction: split `content` into intent-scoped fields: `message_body: str | None`, `reminder_text: str | None`, `task_description: str | None`. The union-field shape costs almost nothing and gives each intent a named home.
+
+## 2026-04-18: scheduled_time format is unconstrained and drifts across 10+ variants
+
+- category: scheduled_time_iso, scheduled_time_kal, scheduled_time_relative_hindi, scheduled_time_relative_english, scheduled_time_shaam_ko (all time categories)
+- offending utterances: across 16 cases with non-null `scheduled_time`, the run produced at least these formats:
+  - ISO time-only: "15:00:00", "17:00:00", "18:00:00"
+  - ISO time+tz (no date): "08:30:00+05:30", "21:00:00+05:30"
+  - Natural language: "tomorrow 10 AM", "tomorrow morning", "tomorrow at 6 PM", "in 30 minutes", "in 2 hours", "in a little while", "now"
+  - Malformed: "tomorrow 09:00:00+05:30:00" (double-colon tz), "10:00:00 AM IST 2024-05-15T10:00:00Z" (two formats concatenated plus an invented 2024 date, run date is 2026)
+- friction: the field description at `app/services/classify.py:48-51` offers two options in one sentence ("ISO 8601 time like '2026-04-18T15:00:00' or relative like 'in 30 minutes'") without forcing a pick. The model sometimes emits both at once; sometimes emits time-only with no date; sometimes hallucinates a date. Downstream code would need a dense natural-language date parser, and "10:00:00 AM IST 2024-05-15T10:00:00Z" is not machine-parseable at all.
+- suggested direction: split into `scheduled_time_raw: str | None` (verbatim what the user said) and `scheduled_time_iso: str | None` (normalized ISO 8601, or null if the model can't normalize). Pass today's date into the prompt so "kal" resolves to a real date instead of one invented from pretraining.
+
+## 2026-04-18: followup_check never populated, even on cases that literally say "follow up"
+
+- category: multi_intent_compound, general
+- offending utterances:
+  - "Ramu ko bolo Praveen ko call kare aur delivery confirm kare" → followup_check=None (should be something like "delivery confirmed with Praveen")
+  - "Driver ko bolo godown jaaye aur ek ghante baad yaad dilana follow up karna hai" → followup_check=None; follow-up semantics leaked into `scheduled_time="in 1 hour from now"` on a delegate intent
+  - "Sharma ji ko call karo aur baad mein yaad dilana payment ka pucha tha" → followup_check=None; follow-up semantics leaked into `scheduled_time="in a little while"` on a call intent (call intents should have no time field at all)
+- friction: 0 of 32 cases populated `followup_check`. The field is effectively invisible to the model even when the utterance contains "follow up" or "yaad dilana". Follow-up semantics instead misfile into `scheduled_time`, which is supposed to be reminder-only.
+- suggested direction: either remove `followup_check` as dead weight, or replace with a structured `followup_reminder: {text: str, time: str} | None` that any intent can set. The structured shape also resolves the multi-intent-collapse friction below.
+
+## 2026-04-18: multi-intent utterances collapse to primary, secondary misfiles into scheduled_time
+
+- category: multi_intent_compound (generalizes the earlier "delegate intent with a time" entry)
+- offending utterances:
+  - "Rajesh ko message bhejo ki kal aana hai aur 5 baje yaad bhi dilana" → intent=message, scheduled_time="tomorrow 5 PM" (but this is a self-reminder, not a message send-time)
+  - "Driver ko bolo godown jaaye aur ek ghante baad yaad dilana follow up karna hai" → intent=delegate, scheduled_time="in 1 hour from now" (delegate has no defined time slot)
+  - "Sharma ji ko call karo aur baad mein yaad dilana payment ka pucha tha" → intent=call, scheduled_time="in a little while" (call has no time slot at all)
+- friction: every compound-intent case in the run (4 of 4) produced intent=<primary> with the secondary intent's time leaking into `scheduled_time`, a field documented as reminder-only. For call intents, the leak lands in a field that shouldn't exist for that intent. Same underlying shape as the earlier delegate-with-time entry but the pattern spans message+reminder, delegate+reminder, call+reminder.
+- suggested direction: add a structured secondary slot: `followup_reminder: {text: str, time_raw: str} | None` that any non-reminder intent can set. Supersedes both the per-intent `scheduled_time` misuse and the orphaned `followup_check` field. Would also let the classifier express "do the primary, plus remind me later" without needing two round trips.
+
+## 2026-04-18: ambiguity has no structured representation, forces a guess
+
+- category: ambiguous_clarification
+- offending utterance: "Rajesh ko 5 baje bolo"
+- friction: this utterance is genuinely ambiguous between `message` ("tell Rajesh something at 5"), `delegate` ("instruct Rajesh to do something at 5"), and `reminder` ("remind me at 5 about Rajesh"). The schema requires a single `intent` string; the only escape valve is `clarification_needed` (free text). The model picked `delegate` with no clarification set, and it was the only classifier failure in the run (31/32). The schema shape discourages deferring because the rest of the record assumes a committed intent, so the model commits.
+- suggested direction: add `candidate_intents: list[str]` sorted by plausibility, and treat `intent` as the top candidate. Or add `is_ambiguous: bool` that explicitly opts into the clarification path. Either gives the model a first-class way to say "I'm not sure which of these three this is" without dropping to the `unknown` intent.
+
+## 2026-04-18: channel is never extracted on messages, even when the user literally names it
+
+- category: general (applies to every message case)
+- offending utterances:
+  - "Rajesh ko WhatsApp karo, bolo kal subah 10 baje aa jaaye" → channel=None
+  - "Supplier ko SMS bhejo, cement ka rate kya hai confirm karo" → channel=None
+  - "Sharma sahab ko WhatsApp karo, kal milte hain shop par" → channel=None
+- friction: 4 of 5 message cases contained an explicit channel word ("WhatsApp karo", "SMS bhejo"); `channel` came back None on all 5. Closer to a prompt-shape miss than a schema-shape miss, but there is a schema-level fix: `channel` is currently `Optional[str]` with free-text description, which the model treats as opt-in. Downstream handlers can't route the message without this field.
+- suggested direction: type `channel` as `Literal["whatsapp", "sms", "telegram"] | None`. Pydantic's JSON Schema emits `enum: [...]`, which Gemini's Schema dialect accepts, and enums make "pick one of these if you see a matching word" much more salient to the model than prose descriptions.
