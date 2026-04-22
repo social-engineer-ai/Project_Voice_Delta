@@ -1,6 +1,7 @@
 python-telegram-bot==21.6
 google-generativeai==0.8.3
-httpx==0.27.2
+httpx==0.28.1
+sarvamai==0.1.28
 sqlalchemy==2.0.35
 psycopg2-binary==2.9.10
 python-dotenv==1.0.1
@@ -11,8 +12,17 @@ rapidfuzz==3.10.0
 fastapi==0.115.0
 uvicorn==0.31.0
 
-# Voice biometrics (Phase 1 trust layer)
-resemblyzer==0.1.4
-librosa==0.10.2
-numpy==1.26.4
-soundfile==0.12.1
+# Voice biometrics (Phase 1 trust layer).
+# Switched from Resemblyzer to SpeechBrain ECAPA-TDNN on 2026-04-22 after
+# benchmarking showed Resemblyzer could not separate unrelated speakers
+# reliably on our test recordings. ECAPA-TDNN is a ~80 MB model downloaded
+# to .cache/spkrec-ecapa/ on first use. torch CPU wheels keep install under
+# 500 MB total. See SESSION_NOTES_2026-04-22.md and SPEC.md.
+speechbrain==1.1.0
+torch==2.11.0
+soundfile==0.13.1
+imageio-ffmpeg==0.6.0
+
+# librosa is kept for noise/quality tooling in scripts/ even though it is
+# not on the production request path.
+librosa==0.11.0

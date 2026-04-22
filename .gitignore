@@ -9,3 +9,4 @@ venv/
 .idea/
 *.log
 tests/last_run.json
+.cache/

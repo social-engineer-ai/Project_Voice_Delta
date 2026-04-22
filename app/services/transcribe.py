@@ -1,10 +1,17 @@
-"""Sarvam Saarika speech-to-text wrapper.
+"""Sarvam Saaras speech-to-text wrapper.
 
-Sarvam's Saarika ASR handles Hindi, code-mixed Hindi-English, and 9 other
-Indian languages. We use language_code="unknown" to auto-detect, which works
-well for code-mixed speech.
+Uses saaras:v3 in codemix mode, language_code="hi-IN". Saaras v3 is Sarvam's
+current recommended ASR (saarika v2.5 is on their deprecation path) and
+fixes proper-noun errors that v2.5 makes on common Hindi names: v2.5 heard
+"Ramu" as "Naamu" in our 2026-04-22 evaluation; saaras:v3 gets it right.
 
-Pricing (April 2026): ₹30 per hour of audio = ₹0.50 per minute.
+Codemix mode preserves English loanwords (phone, call, delivery, SMS,
+WhatsApp, accountant) in Latin script alongside Devanagari, which matches
+how Indian shopkeepers actually speak and gives the downstream intent
+classifier a more faithful signal than forced-Devanagari output does.
+
+Pricing (April 2026): ₹30 per hour of audio = ₹0.50 per minute. Mode and
+model don't affect price per the public pricing page.
 """
 import logging
 from pathlib import Path
@@ -15,22 +22,25 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
-async def transcribe_audio(audio_path: Path, language_code: str = "unknown") -> str:
-    """Transcribe an audio file using Sarvam Saarika.
+async def transcribe_audio(audio_path: Path, language_code: str = "hi-IN") -> str:
+    """Transcribe an audio file using Sarvam saaras:v3 codemix.
 
     Args:
         audio_path: local path to an audio file (OGG from Telegram works directly)
-        language_code: "hi-IN", "en-IN", "unknown" (auto-detect), etc.
+        language_code: default "hi-IN"; pass "unknown" for auto-detect if the
+            shop later supports languages beyond Hindi.
 
     Returns:
-        Transcribed text in the detected/specified language.
+        Transcribed text mixing Devanagari for Hindi words and Latin for
+        English loanwords, as spoken.
     """
     headers = {"api-subscription-key": settings.sarvam_api_key}
 
     with open(audio_path, "rb") as f:
         files = {"file": (audio_path.name, f, "audio/ogg")}
         data = {
-            "model": "saarika:v2.5",
+            "model": "saaras:v3",
+            "mode": "codemix",
             "language_code": language_code,
         }
 

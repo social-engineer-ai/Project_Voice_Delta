@@ -102,7 +102,12 @@ class VoiceProfile(Base):
     the user's enrolled embeddings and take the maximum similarity.
 
     Embeddings are stored as BLOB (numpy float32 array bytes) for efficiency.
-    Resemblyzer produces 256-dimensional float32 embeddings = 1024 bytes each.
+    As of 2026-04-22, the encoder is SpeechBrain's ECAPA-TDNN
+    (`speechbrain/spkrec-ecapa-voxceleb`), which produces 192-dimensional
+    float32 embeddings = 768 bytes each. Profiles persisted under the earlier
+    Resemblyzer encoder are 256-dim (1024 bytes) and must be re-captured —
+    `verify_speaker` logs a warning and skips dimension-mismatched profiles
+    rather than hard-failing.
     """
     __tablename__ = "voice_profiles"
 

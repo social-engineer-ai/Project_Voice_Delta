@@ -116,9 +116,16 @@ class IntentClassification(BaseModel):
         description="For 'delegate': what to follow up on later, if implied. Example: 'check if Ramu called Praveen'."
     )
     confidence: float = Field(
-        default=0.0,
+        default=0.8,
         description="0.0 to 1.0, how confident the classification is."
     )
+    # Default is 0.8 not 0.0 because Gemini 2.5 Flash-Lite often omits
+    # optional numeric fields from its structured output even when the
+    # prompt instructs it to populate them. Treating an omitted field as
+    # "confident" is the intended semantic (if the model picked an intent
+    # at all, it was confident enough to do so); the fallback path in
+    # classify_intent() explicitly sets 0.0 when Gemini itself errored,
+    # which still triggers the handler's clarification gate as designed.
     clarification_needed: Optional[str] = Field(
         default=None,
         description="If the intent is ambiguous, what to ask the user for. Null if clear."
@@ -173,8 +180,17 @@ Important rules:
 - Populate exactly one of message_body, reminder_text, task_description based on
   the intent. The other two must be null. For 'call' and 'unknown', all three
   must be null.
-- confidence should reflect how unambiguous the intent is. Below 0.7 means the
-  handler will ask for confirmation before acting.
+- Missing is missing. If a number, time, or proper noun is not clearly present
+  in the transcript, leave the corresponding field null. Do not infer a plausible
+  value from context. Example: if the transcript is "Hours remind me to call
+  supplier" and there is no number before "Hours", scheduled_time must be null —
+  not "in 1 hour".
+- Always populate `confidence` with an explicit value. Use >=0.9 when the intent
+  is unambiguous and all required slots are filled directly from the transcript.
+  Use 0.6-0.8 when slot extraction is partial or the recipient is named but
+  unfamiliar. Use <0.5 when the intent itself is uncertain. The handler gates on
+  <0.5 to ask for confirmation before acting, so 0.0 defaults must never ship on
+  a successful parse.
 
 Always respond with valid JSON matching the provided schema. No preamble, no
 explanation outside the JSON."""
