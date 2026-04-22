@@ -1,5 +1,13 @@
 # SPEC: Iterate MESSAGE prompt block to handle Hindi X-karo-Y
 
+Status: **deferred** as of 2026-04-22. The current active spec is
+`SPEC.md` (prototype handoff to Yogesh: ASR + biometric + classifier
+guardrails). That work does not address the message_body gap. The
+2026-04-22 classifier run confirmed message body population is still
+1/5 under Flash-Lite, unchanged from the last recorded attempt. Pick
+this up after Yogesh returns field data — by then we should also have
+a contact-list context layer to pair with.
+
 Author: AV (via Claude Code)
 Date: 2026-04-19
 Scope: Close the remaining gap from the 2026-04-19 content-split

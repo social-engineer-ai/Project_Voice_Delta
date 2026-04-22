@@ -28,9 +28,25 @@ Don't assume any of these are needed; ask AV which ones fit the current task.
 - **Comments explain why, not what.** The code shows what; comments should add the reasoning.
 - **Type hints throughout.** Python 3.11 style, `str | None` not `Optional[str]`.
 
+## Current pipeline choices (2026-04-22)
+
+These are the active model and mode selections on main after the 2026-04-22 evaluation session. When changing any of them, update this section and `SPEC.md` in the same commit.
+
+- **ASR**: Sarvam `saaras:v3` with `mode="codemix"`, `language_code="hi-IN"`, sync `/speech-to-text` endpoint. Migrated from `saarika:v2.5` because v2.5 is on Sarvam's deprecation path and misrecognised common Hindi names ("Ramu" → "Naamu") that saaras:v3 got right. Codemix mode preserves English loanwords in Latin script alongside Devanagari, matching how shopkeepers actually speak.
+- **Biometric**: SpeechBrain `spkrec-ecapa-voxceleb` (ECAPA-TDNN), 192-dim embeddings, cosine similarity. Migrated from Resemblyzer because Resemblyzer could not separate confirmed-unrelated speakers on our test audio (margin +0.003, unusable); ECAPA-TDNN gave a +0.473 margin on the same data. Thresholds: `strict=0.70, medium=0.55, loose=0.40, off=0.0`. Weights cache to `.cache/spkrec-ecapa/` (gitignored).
+- **Classifier**: Gemini 2.5 Flash-Lite with the prompt in `app/services/classify.py`. Confidence default is 0.8 (not 0.0) because Gemini omits the field on successful classifications; fallback path in `classify_intent()` still emits 0.0 explicitly so the handler's `< 0.5` clarification gate behaves correctly.
+
+## Known ASR failure modes worth defending against
+
+These surfaced in the 2026-04-22 evaluation and recur across independent recordings. Context engineering (contact list + shop vocabulary in the classifier prompt) is the next leverage; the ASR-side levers are mostly exhausted.
+
+- **Proper-noun drift on names**: "Ramu" → "Naamu" / "Aamu", "Praveen" → "Permanent" / "Parman" / "Permit". Different renderings each time the audio runs. Rely on the contact resolver to fuzzy-match on phonetic distance rather than exact string.
+- **English loanword → Hindi phonetic neighbour**: "shop par" → "subah sahab par", "Accountant ji" → "Mountain G". Not noise-driven; happens in clean recordings. The classifier prompt or a post-ASR correction layer is where this gets fixed, not the ASR.
+- **Leading-number drop on short utterances**: "3 baje" → "baje", "2 hours remind me" → "Hours remind me". Short fragments are more brittle than full sentences. Classifier prompt now forbids guessing missing numbers; pair with a "ask the user" flow when the reminder time is null.
+
 ## Architecture conventions
 
-- **Services** (`app/services/`) are stateless wrappers around external APIs (Sarvam, Gemini, Resemblyzer) or pure-function utilities (contact_resolver). They don't know about Telegram.
+- **Services** (`app/services/`) are stateless wrappers around external APIs (Sarvam, Gemini, SpeechBrain) or pure-function utilities (contact_resolver). They don't know about Telegram.
 - **Handlers** (`app/handlers/`) orchestrate services and interact with Telegram. They take `(update, context, user, intent)` for intent handlers or `(update, context)` for command handlers.
 - **DB access** goes through `SessionLocal()` with a `try/finally db.close()` pattern. No global sessions.
 - **Voice verification** happens in `handle_voice_message` before transcription — fail fast on bad voices.

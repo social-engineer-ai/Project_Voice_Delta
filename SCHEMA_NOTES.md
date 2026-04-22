@@ -126,6 +126,41 @@ The following entries were added after the first real end-to-end harness run (20
 - friction: 4 of 5 message cases contained an explicit channel word ("WhatsApp karo", "SMS bhejo"); `channel` came back None on all 5. Closer to a prompt-shape miss than a schema-shape miss, but there is a schema-level fix: `channel` is currently `Optional[str]` with free-text description, which the model treats as opt-in. Downstream handlers can't route the message without this field.
 - suggested direction: type `channel` as `Literal["whatsapp", "sms", "telegram"] | None`. Pydantic's JSON Schema emits `enum: [...]`, which Gemini's Schema dialect accepts, and enums make "pick one of these if you see a matching word" much more salient to the model than prose descriptions.
 
+## 2026-04-22: classifier hallucinates slots when ASR drops a token
+
+- category: general (surfaced on reminder and delegate; likely spans all intents)
+- offending utterances (from `recordings/intent_classification.md`):
+  - ASR output "Hours remind me to call supplier" (Sarvam dropped the leading "2") → classifier emitted `scheduled_time="in 1 hour"`, inventing a number that was never spoken.
+  - ASR output "Baje yaad dilana Rajesh ko call karna hai" (Sarvam dropped the leading "3") → classifier emitted intent=reminder with recipient_name=Rajesh and a non-null reminder_text, but scheduled_time=null. Mixed behaviour: silent on time here, hallucinated on the previous case.
+- friction: the prompt does not explicitly forbid guessing missing numbers/names/times. On cases where ASR has visibly dropped a leading token, the classifier sometimes fills in a plausible value rather than leaving the field null. This is worst on `scheduled_time` because the field accepts free-text and downstream handlers will happily schedule a fired-up "1 hour from now" reminder the user never asked for.
+- suggested direction: add to "Important rules" in the system prompt: "If a number, time, or proper noun is not clearly present in the transcript, leave the corresponding field null. Missing is missing. Do not infer." Tighten further once the `scheduled_time_raw` vs `scheduled_time_iso` split (2026-04-18 entry) lands — the raw field can carry "unclear" as a token instead of null.
+
+## 2026-04-22: confidence field is never populated on success paths
+
+- category: general (observed on every classification in 2026-04-22 run)
+- offending utterances: the entire `recordings/intent_classification.md` run. On 15/18 correct classifications, `confidence` came back 0.0. The only non-zero values were 0.5 (on `unknown` fallbacks) and two edge cases at 0.6 and 0.9.
+- friction: Pydantic defaults `confidence` to 0.0, and Gemini is omitting the field in structured output even when the intent is obvious. The handler's clarification gate (`app/handlers/voice.py:137`) reads confidence to decide whether to ask for confirmation — if every correct intent returns 0.0, the handler should be asking for confirmation on every correct call, which is neither desired behaviour nor what actually happens (indicating the handler is also treating 0.0 as "allow through", a separate wrongness).
+- suggested direction: make confidence mandatory in the prompt with an explicit band. "Always populate `confidence`: ≥0.9 when intent is unambiguous and all slots are filled; 0.6-0.8 when slot extraction is partial; <0.5 when intent is uncertain and the handler should ask for confirmation." Combined with reconciling the prompt/handler threshold mismatch (2026-04-18 entry) by standardising on 0.5 at both sites.
+- scope: this is being addressed in SPEC.md (2026-04-22). Prompt-only change.
+
+## 2026-04-22: Devanagari input slightly less robust than Hinglish translit for the classifier
+
+- category: general (one clear case in 2026-04-22 run)
+- offending utterance: "आमू को बोलो प्रवीण को कॉल करें और डिलीवरी कन्फर्म करें" (Devanagari output of GS PM9; ASR mis-heard "Ramu" as "Aamu" → "आमू").
+- observed: translit variant ("Aamu ko bolo Praveen ko call karke delivery confirm kare") classified as `delegate` with recipient_name=Aamu, task_description populated. Same audio's Devanagari transcript classified as `unknown`. Same intent, same speaker, same content — only script differs.
+- friction: for an ASR-error handling layer we haven't built yet (phonetic fuzzy-matching against the contact list), the classifier is seeing slightly different inputs depending on which output mode we pick. If we ship `saaras:v3 codemix` (mixed Devanagari + English) or `translit` (Latin Hinglish), the classifier should behave identically on either. The 18-clip sample shows one real divergence and suggests Latin-script inputs are marginally more robust for unusual tokens.
+- suggested direction: not a schema fix; either (a) keep Devanagari as production output and include in the prompt "recipient names may be unusual or ASR-garbled; do not reject a plausible command just because the name is unfamiliar", or (b) switch production ASR output to `saaras:v3 translit` and re-baseline. Chose (a) implicitly by going with `codemix` in SPEC.md; the prompt hardening is the smaller lever.
+
+## 2026-04-22: "Ramu ko bolo yaad rakhe" — genuine message/delegate ambiguity
+
+- category: general / intent labelling
+- offending utterance: "Ramu bhaiya ko bolo yaad rakhe, kal delivery aayegi" (RECORDING_BRIEF phrase 4)
+- observed: classifier returns `delegate` with recipient=Ramu, task_description="yaad rakhein kal delivery aayegi". RECORDING_BRIEF labels this phrase as `message`. Brief-vs-classifier disagreement was 2 of 3 apparent "misses" on the 2026-04-22 run; the third was a correctly-rejected missing-recipient case.
+- friction: "X ko bolo Y" is genuinely ambiguous between "send X a message saying Y" (message) and "ask X to do Y" (delegate). The brief's labelling picked `message`; the classifier picked `delegate`. Both are defensible. With intent as a single string, there is no way to express "probably delegate but could be message" — same shape as the 2026-04-18 `Rajesh ko 5 baje bolo` ambiguity entry, different utterance.
+- suggested direction: not a new fix. Tracks with the existing `candidate_intents: list[str]` proposal in the 2026-04-18 "ambiguity has no structured representation" entry. In the meantime, update `RECORDING_BRIEF.md`'s labelling to treat "X ko bolo <content>" as `delegate` when the content describes an action, `message` only when the content is a statement to pass on. Non-binding.
+
+---
+
 ## 2026-04-18: Task.payload keys should match intent-schema field names
 
 - category: general (convention, not a specific friction case)
