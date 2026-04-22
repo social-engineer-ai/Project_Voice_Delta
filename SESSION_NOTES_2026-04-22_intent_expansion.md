@@ -220,6 +220,26 @@ switching in a follow-up.
 
 Two-part commit per the SPEC's plan.
 
+## 15:24 — Shipped
+
+- `e57bb5b` Expand intent taxonomy from 4 to 12 with scope-aware routing
+- `0e47581` Document intent expansion: specs, session notes, handover, brief updates
+
+Both pushed to `origin/main`. Tree clean except the pre-existing
+audio files + raw JSON under `recordings/` (intentionally not
+tracked). Tasks 23-32 all completed.
+
+## Session summary
+
+Started at 14:41, shipped at 15:24 — ~45 minutes of working time
+across interview, spec, implementation, two test runs with an
+iteration between, and commit. The prototype Yogesh and bhaiya
+receive is now the 12-intent version with future-phase logging.
+Next session (post-Yogesh / post-bhaiya) uses the accumulated
+`FuturePhaseLog` aggregates to decide which shop-management module
+to build first — an empirical, evidence-driven priority rather than
+a PRD-ordering guess.
+
 ## 14:49 — Pydantic model_validator added
 
 `IntentClassification` now has a `@model_validator(mode="after")`
