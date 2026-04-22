@@ -151,6 +151,38 @@ The following entries were added after the first real end-to-end harness run (20
 - friction: for an ASR-error handling layer we haven't built yet (phonetic fuzzy-matching against the contact list), the classifier is seeing slightly different inputs depending on which output mode we pick. If we ship `saaras:v3 codemix` (mixed Devanagari + English) or `translit` (Latin Hinglish), the classifier should behave identically on either. The 18-clip sample shows one real divergence and suggests Latin-script inputs are marginally more robust for unusual tokens.
 - suggested direction: not a schema fix; either (a) keep Devanagari as production output and include in the prompt "recipient names may be unusual or ASR-garbled; do not reject a plausible command just because the name is unfamiliar", or (b) switch production ASR output to `saaras:v3 translit` and re-baseline. Chose (a) implicitly by going with `codemix` in SPEC.md; the prompt hardening is the smaller lever.
 
+## 2026-04-22 (later): intent taxonomy expanded from 4 to 12 with scope field
+
+- category: general
+- offending utterance: n/a (scope expansion)
+- change: `IntentClassification.intent` moved from free-text `str` to
+  `Literal` of 12 values. New field `scope: Literal["in_scope",
+  "future_phase", "unknown"]` with a Pydantic `model_validator(mode=
+  "after")` that auto-derives scope from intent when the caller
+  supplies an inconsistent pair. `FuturePhaseLog` table added for
+  aggregating future-phase recognitions over pilot usage.
+- rationale: the bot previously rejected or misrouted shop-domain
+  commands (inventory, collections, orders, etc.) because they fell
+  outside the 4 in-scope intents. Expanding the classifier's
+  listening without expanding the acting lets the brother-shop pilot
+  produce a real usage histogram — priority input for the next module
+  build decision.
+- friction that motivated this entry: schema cleaner test needed no
+  change (it walks keys, and Literal/enum passes through). But two
+  defensive mechanisms were needed because Gemini's structured output
+  can emit inconsistent intent+scope pairs: (1) `classify_intent()`
+  overwrites scope using `scope_for_intent()` after parsing, (2) the
+  Pydantic `model_validator` re-derives scope on every construction,
+  including `IntentClassification(**pending)` reconstruction from
+  cached dicts in the contact-disambiguation callback at
+  `app/main.py:127`. Either mechanism alone would suffice; keeping
+  both costs nothing and covers drift.
+- suggested direction: when adding a new intent, update `IntentValue`,
+  `IN_SCOPE_INTENTS` / `FUTURE_PHASE_INTENTS`, `INTENT_LABEL_HINDI`
+  (for the router echo), the SYSTEM_PROMPT with 1-2 Hindi examples,
+  and `tests/test_classify.py` with 2 representative cases. Aggregated
+  convention in `CLAUDE.md` under "Intent taxonomy".
+
 ## 2026-04-22: "Ramu ko bolo yaad rakhe" — genuine message/delegate ambiguity
 
 - category: general / intent labelling

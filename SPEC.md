@@ -1,190 +1,295 @@
-# SPEC: Prototype handoff changes from 2026-04-22 findings
+# SPEC: Expand intent taxonomy from 4 to 12 with scope-aware routing
 
 Author: AV (via Claude Code)
-Date: 2026-04-22
-Scope: Migrate ASR and biometric encoders to better models, tighten the
-classifier prompt to avoid slot hallucination and to always emit
-confidence. Scoped to what's needed before Yogesh takes the prototype
-for field testing.
+Date: 2026-04-22 (same calendar day as the handoff spec, separate
+session started at 14:41 CDT)
+Scope: Grow the classifier's intent taxonomy so it recognises shop-
+domain commands beyond the four Phase 1 intents, without building the
+backend for each. Future-phase intents are logged and acknowledged so
+we learn real usage priorities before committing to module builds.
 
 ## Context
 
-This SPEC is being written **after** the investigation it acts on. The
-2026-04-22 session started as exploratory transcription and grew into
-broader evaluation. Findings and decisions are recorded in
-`SESSION_NOTES_2026-04-22.md`. This SPEC limits itself to the
-code-level work that operationalises those decisions.
+The earlier 2026-04-22 spec ("Prototype handoff changes") is now
+shipped (commits `99c5bfe`, `0b6d847`, `f912386`). This is a follow-up
+spec triggered by the brother-pilot scope review: the ShopSaathi PRD
+(`../ShopSaarthi/ShopSaathi_PRD.md`) envisions 9 operational modules,
+but Phase 1 of ShopSaarthi Voice Agent only covers four. Testing with
+only four would systematically miss how a real shopkeeper speaks.
 
-The prior `SPEC.md` ("Expand classify.py test coverage", 2026-04-18)
-was already implemented (commit `d967f96`) and is superseded by this file.
+Two paths were weighed. Full-PRD build is out of Phase 1 scope
+(~10-week React Native + Node.js + Postgres effort per the PRD's own
+build sequence). Middle path — expand listening without expanding
+acting — was chosen so the bot can recognise shop-domain commands
+from day one while we learn which modules to build next from real
+usage rather than PRD assumption.
+
+The four interview answers from AV that frame this spec:
+
+1. Taxonomy: compact (12 total), not granular splits.
+2. Future-phase user feedback: specific echo — "Aapne {category}
+   poocha, abhi ye feature build ho raha hai, note kar liya".
+3. Multi-intent (in-scope + future-phase in one command): act on
+   in-scope portion, acknowledge future portion separately.
+4. Logging: new `FuturePhaseLog` SQLite table; aggregate for priority.
 
 ## Goal
 
-Hand Yogesh a prototype with:
-- An ASR pipeline that doesn't misrecognise common Hindi names
-  ("Ramu" → "Naamu") where we already have evidence of a better
-  variant.
-- A speaker-verification layer that can actually distinguish unrelated
-  speakers at the strict threshold.
-- A classifier that is honest about what it doesn't know — no guessed
-  times, confidence always populated so the handler's clarification
-  logic works.
+At the end of this session:
+
+- The classifier recognises 12 intent categories, not 4.
+- Each classification carries an explicit `scope` field so the router
+  does not have to match on intent strings.
+- Future-phase commands are logged to a structured table with enough
+  context (intent, transcript, confidence, extracted slots) that a
+  two-week pilot produces a usage histogram — the input for the next
+  module-build prioritisation.
+- The existing four intents (`message, reminder, delegate, call`)
+  behave exactly as before. No regression on the 31/32 baseline in
+  `tests/test_classify.py`.
+- `bhaiya` and Yogesh both get this build; the pilot is the same
+  binary with different enrolled users.
 
 ## Out of scope
 
-- Contact-list context in the classifier prompt. Highest-value next
-  step per `SESSION_NOTES_2026-04-22.md` but requires a decision on
-  the three-layer schema (general / vertical / shop-specific) which
-  `CLAUDE_CODE_KICKOFF.md` marks as a flag-don't-solve item.
-- Telegram-side `/enroll` UX changes. The underlying `store_enrollment`
-  keeps its shape; any conversational changes belong in a later spec.
-- Migrating stored Resemblyzer embeddings. Existing enrollments become
-  invalid with the encoder swap; re-enrollment on first command is
-  acceptable for the prototype stage.
-- Sarvam hotword / phrase-bias experiment. Saved for a later round of
-  accuracy work.
+- Implementing any backend for `order`, `collection`, `supplier_payment`,
+  `inventory`, `price_check`, `worker`, `summary` intents. Only
+  recognition and logging.
+- Contact-list context injection into the classifier prompt. Still
+  deferred; will ship after bhaiya supplies his contact list (see
+  `BROTHER_PILOT.md`).
+- Telegram UX for viewing `FuturePhaseLog` aggregates. A later admin
+  command once enough data accumulates.
+- MESSAGE-prompt iteration from `SPEC_NEXT_SESSION.md`. Still
+  deferred.
+- WhatsApp API integration, call recording, Exotel — these are
+  PRD-scope items, not this session.
 
-## Changes by file
+## The 12-intent taxonomy
 
-### `app/services/transcribe.py`
+| Intent | Scope | What it covers | Example (Hinglish) |
+|---|---|---|---|
+| `message` | in_scope | send a WhatsApp/SMS to a person | "Rajesh ko WhatsApp karo, kal delivery aayegi" |
+| `reminder` | in_scope | set a self-reminder at a time | "3 baje yaad dilana Rajesh ko call karna hai" |
+| `delegate` | in_scope | tell someone to do a task | "Ramu ko bolo Praveen ko call kare" |
+| `call` | in_scope | place a phone call | "Accountant ji ko call karo abhi" |
+| `order` | future_phase | customer/supplier orders — inquiry, status, update | "Sharma ji ko 50 bori cement ka order karo" / "Rajesh ke order ka status kya hai" |
+| `collection` | future_phase | customer payments owed to bhaiya | "Rajesh ka kitna pending hai", "Kisne paisa dena hai aaj" |
+| `supplier_payment` | future_phase | what bhaiya owes suppliers | "Sharma ji ko kitna dena hai", "Aaj supplier payment kya hai" |
+| `inventory` | future_phase | stock queries and updates | "Cement kitna bacha hai", "10 bori cement aayi hai" |
+| `price_check` | future_phase | supplier/market rates | "Aaj gitti ka rate kya chal raha hai" |
+| `worker` | future_phase | worker status beyond delegate | "Ramu kahan hai abhi", "Chhotu abhi tak nahi aaya" |
+| `summary` | future_phase | daily/weekly business overview | "Aaj kitna business hua", "Haftey ka total kya hai" |
+| `unknown` | unknown | doesn't match any category | "Namaste, kya haal hai" |
 
-Switch the ASR call to `saaras:v3` with `mode="codemix"` and
-`language_code="hi-IN"`. Reasons, from the variant comparison:
+## Schema changes
 
-- `saaras:v3` recovers "Ramu" where `saarika:v2.5` mis-heard "Naamu".
-- `codemix` mode preserves English tokens (`phone`, `call`, `accountant`)
-  in Latin script alongside Devanagari, which matches how shopkeepers
-  actually speak and gives the classifier a more faithful signal.
-- `saarika:v2.5` is on Sarvam's deprecation path, so staying on it is
-  technical debt.
+### `IntentClassification` (`app/services/classify.py`)
 
-Keep the existing function signature and the sync endpoint. Telegram
-voice messages fit in the 30s sync window for almost all real commands.
+Change `intent` from free-text `str` to `Literal` over the 12 values
+above. Gemini's Schema dialect accepts `enum`, which Pydantic emits
+for `Literal` types, so the schema cleaner does not need changes.
+Making it a Literal also nudges the model toward picking from the
+known set rather than inventing.
 
-### `app/services/verify_speaker.py`
-
-Swap Resemblyzer for SpeechBrain ECAPA-TDNN
-(`speechbrain/spkrec-ecapa-voxceleb`). Keep the module's public API —
-`compute_embedding`, `verify_speaker`, `store_enrollment`, `THRESHOLDS`
-— intact, because the handler and enrollment paths import them by name.
-
-Rebase thresholds to match ECAPA's cosine-score distribution:
+Add a new field:
 
 ```python
-THRESHOLDS = {
-    "strict": 0.70,   # +0.28 margin over the worst imposter we measured
-    "medium": 0.55,
-    "loose":  0.40,
-    "off":    0.0,
-}
+scope: Literal["in_scope", "future_phase", "unknown"] = Field(
+    default="in_scope",
+    description="Whether the handler can fulfill this intent today..."
+)
 ```
 
-Default `security_threshold` on `User` remains `"medium"` for
-unenrolled-but-marked-enrolled edge cases, but the recommended value
-for the prototype is `"strict"` — set this in the first-enrollment flow
-in a later spec if needed.
+The prompt will map each intent to its scope, and the model is told
+to emit the scope explicitly (redundant with the intent value, but
+redundant signals are cheap and catch model drift).
 
-Lazy-load ECAPA the same way the Resemblyzer encoder is lazy-loaded.
-First call downloads ~80 MB of weights to `.cache/spkrec-ecapa/`.
-Cache directory is git-ignored (add to `.gitignore` if not already).
+Everything else on `IntentClassification` is kept as-is. `message_body`,
+`reminder_text`, `task_description`, `scheduled_time`, `recipient_name`,
+`channel`, `followup_check`, `confidence`, `clarification_needed` —
+all preserved. Future-phase intents may populate `message_body` or
+`task_description` loosely ("cement stock" as task_description on an
+`inventory` command) — this is fine for v1; we will tighten if
+aggregates are noisy.
 
-### `app/services/classify.py`
+### `SYSTEM_PROMPT` (`app/services/classify.py`)
 
-Two prompt tweaks, no schema change:
+Grow the prompt with seven new sections — one per future-phase intent
+— each with the same shape:
 
-1. **Forbid guessing missing slots.** Add to the "Important rules"
-   block: "If a number, time, or proper noun is not clearly present in
-   the transcript, leave the corresponding field null. Do not infer a
-   plausible value from context. Missing is missing."
+```
+INTENT_NAME: one-line what it is
+Examples:
+- "<Hindi/Hinglish example 1>"
+- "<Hindi/Hinglish example 2>"
+Output: intent=INTENT_NAME, scope=future_phase, recipient_name=<if named>, ...
+```
 
-2. **Mandatory confidence band.** Replace the current single-line
-   "confidence should reflect" rule with: "Always populate `confidence`.
-   Use ≥0.9 when the intent is unambiguous and all slots are filled
-   from the transcript. Use 0.6-0.8 when slot extraction is partial or
-   the recipient is named but unfamiliar. Use <0.5 when the intent
-   itself is uncertain — the handler will ask for confirmation."
+Keep examples minimal (1-2 per category) so the prompt doesn't
+balloon. Total new prompt addition estimated at ~40 lines.
 
-Also: update the confidence handling. The handler's clarification path
-(`app/handlers/voice.py:137` and `:184`) gates on `<0.5`; the previous
-prompt said `<0.7`. Align the prompt to the handler (0.5) rather than
-the other way round, because changing the handler touches more
-downstream paths. `SCHEMA_NOTES.md` 2026-04-18 entry about this exact
-inconsistency is being resolved by this change.
+Add a new rule in "Important rules":
 
-### `app/db/models.py`
+> Always set `scope` to match the intent: `message`, `reminder`,
+> `delegate`, `call` → `in_scope`. `order`, `collection`,
+> `supplier_payment`, `inventory`, `price_check`, `worker`, `summary`
+> → `future_phase`. `unknown` → `unknown`.
 
-Update the `VoiceProfile` docstring to reflect ECAPA-TDNN's
-192-dimensional float32 embedding (768 bytes per sample vs 1024 with
-Resemblyzer). No column schema change — `LargeBinary` accommodates
-either.
+### `FuturePhaseLog` (`app/db/models.py`)
 
-### `requirements.txt`
+New table:
 
-Add:
-- `speechbrain==1.1.0`
-- `torch` (CPU wheels via PyTorch's CPU index)
-- `soundfile==0.13.1`
-- `imageio-ffmpeg==0.6.0`
+```python
+class FuturePhaseLog(Base):
+    __tablename__ = "future_phase_logs"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    transcript = Column(Text, nullable=False)
+    intent = Column(String(32), nullable=False, index=True)
+    scope = Column(String(16), nullable=False)
+    confidence = Column(Float, nullable=True)
+    recipient_name = Column(String(128), nullable=True)
+    extracted_slots = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+```
 
-Remove:
-- `resemblyzer==0.1.4`
-- `webrtcvad-wheels` (was a transitive of resemblyzer on Windows)
+Indexed on `user_id`, `intent`, and `created_at` so "top intents for
+bhaiya in the last 7 days" is a cheap query. `extracted_slots` carries
+the full IntentClassification dict for whatever slots the model filled,
+so we can inspect retrospectively.
 
-`librosa` stays — useful for future noise/quality tooling even though
-it isn't in the production path.
+### `app/db/init_db.py`
 
-### `CLAUDE.md`
+No code change expected — `Base.metadata.create_all(engine)` picks up
+new models. Verify this empirically after implementation.
 
-Append a short "Current state (2026-04-22)" subsection under
-architecture conventions listing: current ASR (`saaras:v3 codemix`),
-current biometric (ECAPA-TDNN), the three known ASR failure modes that
-context-engineering should address next
-(proper-noun drift, English-loanword phonetic confusion, number drop on
-short utterances).
+## Router changes
 
-### `recordings/DATA_COLLECTION_BRIEF_v2.md`
+### `app/handlers/voice.py`
 
-Remove the paragraph-length-enrollment recommendation in the earlier
-version (it was written before we tested ECAPA). Replace with a note:
-"Enrollment sessions can use the first 5-6 Section A phrases back to
-back. ECAPA-TDNN gives a clean separation margin on 30s of speech;
-dedicated paragraph recording is not required."
+Current behaviour: `handle_voice_message` calls `classify_intent`,
+checks `confidence < 0.5 or intent == "unknown"` for clarification,
+then routes to a handler dict:
 
-## Verification
+```python
+handlers = {
+    "message": handle_message_intent,
+    "reminder": handle_reminder_intent,
+    "delegate": handle_delegate_intent,
+    "call": handle_call_intent,
+}
+handler = handlers.get(intent.intent)
+```
 
-Before handover:
+New behaviour:
 
-1. `tests/test_schema_cleaner.py` — must pass (hook-enforced on any
-   edit to `classify.py`).
-2. `tests/test_classify.py` — run against the updated prompt. Report
-   any intent-accuracy regression of >5 points to AV before shipping.
-3. A single manual round-trip: a Telegram voice message in Hindi from
-   AV's phone, through the updated `handle_voice_message`, should
-   transcribe, classify, and produce the expected intent. (If AV can't
-   do this pre-handover, Yogesh does it as first smoke test.)
-4. Enrollment smoke test: `/enroll` five phrases, `/voicestatus` shows
-   enrolled, a follow-up command from the same voice passes
-   verification, a command from a different voice is rejected at
-   `strict`.
+```python
+if intent.scope == "unknown" or intent.confidence < 0.5:
+    <existing clarification path>
+
+elif intent.scope == "in_scope":
+    <existing routing to handler dict>
+
+elif intent.scope == "future_phase":
+    <log to FuturePhaseLog>
+    <reply with specific echo>
+```
+
+Multi-intent handling: not currently supported by the schema (intent
+is a single value). The primary intent determines the path. If the
+primary is `in_scope` and the model noticed a secondary future-phase
+action, it should surface that in `clarification_needed` for now. A
+future schema change could add a real `secondary_intent` field, but
+this session keeps the intent cardinality as-is.
+
+Future-phase echo template (Hinglish):
+
+```
+"Aapne {intent_label_hindi} poocha. Abhi ye feature build ho raha hai,
+note kar liya. {specific_slot_echo_if_any}"
+```
+
+Where `intent_label_hindi` is a small mapping table in Python (e.g.
+`inventory` → "stock check", `price_check` → "rate check",
+`collection` → "customer payment", etc.) and
+`specific_slot_echo_if_any` is populated if the model extracted a
+recipient or product.
+
+### `app/main.py`
+
+The `IntentClassification(**pending)` reconstruction at `main.py:127`
+in the contact-disambiguation callback needs to tolerate the new
+`scope` field. Pydantic will accept the extra key and use the default
+if missing. Verify in implementation.
+
+## Test coverage
+
+`tests/test_classify.py` gets 14 new cases — 2 per future-phase
+intent category — following the existing test-case dict shape.
+Assertions:
+
+- Intent hard-assert (existing).
+- `scope` hard-assert against expected (`future_phase` for all new
+  cases).
+- Body-field loose-assert stays as-is; new intents should mostly
+  populate `task_description` with the essence of what was asked,
+  not required.
+
+Acceptance before merge:
+
+- Existing 32 cases: ≥31/32 correct intent (current baseline).
+- New 14 cases: ≥12/14 correct intent.
+- All cases: `scope` matches expected.
+- `tests/test_schema_cleaner.py` passes (hook-enforced).
+
+If new-case accuracy is below the bar, iterate on prompt examples
+once before merging. If existing regresses, the prompt expansion is
+too aggressive and we trim examples.
+
+## Documentation updates
+
+- `CLAUDE.md`: update "Current pipeline choices" to list the 12
+  intents and mention the future_phase routing pattern.
+- `BROTHER_PILOT.md`: update the "What the bot does today" section
+  to reflect expanded listening + logging.
+- `HANDOVER.md`: brief note that Yogesh also gets the expanded
+  scope (same binary).
+- `SCHEMA_NOTES.md`: log any friction encountered during
+  implementation (there will be some — Literal+Gemini, prompt size,
+  accuracy tradeoffs).
+- `SESSION_NOTES_2026-04-22_intent_expansion.md`: running timestamped
+  log of this session.
+
+## Commit plan
+
+Two commits, same code/docs split as the earlier handoff work:
+
+1. **Code**: classify.py, models.py, voice.py, main.py (if needed),
+   tests/test_classify.py.
+2. **Docs**: SPEC.md (this file), CLAUDE.md, BROTHER_PILOT.md,
+   HANDOVER.md, SCHEMA_NOTES.md, SESSION_NOTES_2026-04-22_intent_expansion.md.
+
+Push to `origin/main`.
 
 ## Rollback
 
-If ECAPA-TDNN causes latency or deploy issues on Yogesh's environment,
-fall back to Resemblyzer by reverting `verify_speaker.py` and restoring
-`resemblyzer` in `requirements.txt`. The VoiceProfile column accepts
-either encoder's output. Document any user who enrolled under ECAPA as
-needing to re-enroll if the rollback happens — the 256-dim vs 192-dim
-mismatch would produce garbage scores otherwise.
+If new-case accuracy is catastrophic (< 50%) or old-case regresses
+below 28/32, revert the classify.py prompt changes only. Keep the
+schema additions and FuturePhaseLog table — they are cheap and
+inert. Iterate the prompt in a follow-up session using the same
+infrastructure.
 
-If `saaras:v3 codemix` produces worse results for Yogesh's test users
-than `saarika:v2.5` did for AV, revert the one-line change in
-`transcribe.py`. No migration needed — the two models are interchangeable
-at the API level.
+## Risks
 
-## Handover doc
-
-A separate `HANDOVER.md` is produced alongside this spec with:
-- How to run locally (env vars, first-time enrollment, cache directory).
-- Known issues left unresolved (Praveen drift, Mountain G, Aamu).
-- Suggested smoke-test flow for Yogesh on day one.
-- What to do if something breaks.
+- **Latency**: longer prompt → slightly slower classifier calls.
+  Flash-Lite is fast (median ~1s); expect ~1.2s after expansion.
+  Acceptable for voice UX.
+- **Accuracy regression on the existing 4**: the model may confuse
+  `message` with `order` (both involve talking to a supplier), or
+  `reminder` with `summary`. Mitigation: prompt examples keep
+  in-scope cases first and most prominent.
+- **Over-logging**: if the model defaults to future-phase too
+  readily on ambiguous inputs, `FuturePhaseLog` fills with noise.
+  Mitigation: the `unknown` path is preserved; ambiguous inputs
+  should still go to unknown, not future_phase.

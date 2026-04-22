@@ -4,9 +4,28 @@ Audience: Yogesh
 Purpose: Pick up this branch and run the bot end-to-end for further
 testing in real conversations and, when ready, in real shops.
 
+## Two updates in one handover
+
+This handover bundles two related pushes from 2026-04-22:
+
+1. **Pipeline migrations** (commit `99c5bfe`): ASR swapped to
+   saaras:v3 codemix, biometric swapped to SpeechBrain ECAPA-TDNN,
+   classifier prompt hardened against slot hallucination.
+2. **Intent taxonomy expansion** (later commit, same day): classifier
+   grew from 4 intents to 12. The new 7 (`order, collection,
+   supplier_payment, inventory, price_check, worker, summary`) are
+   future-phase — the bot recognises and logs them but does not yet
+   act. See `SESSION_NOTES_2026-04-22_intent_expansion.md` and the
+   updated `SPEC.md` for details.
+
+Both changes apply to your test sessions too — the binary you run is
+the same one AV's brother will run in Indore.
+
 ## What changed since the last time you saw this code
 
-Full context is in `SESSION_NOTES_2026-04-22.md`. The short list:
+Full context is in `SESSION_NOTES_2026-04-22.md` (pipeline) and
+`SESSION_NOTES_2026-04-22_intent_expansion.md` (taxonomy). The short
+list:
 
 | Area | Before | After |
 |---|---|---|
@@ -15,6 +34,9 @@ Full context is in `SESSION_NOTES_2026-04-22.md`. The short list:
 | Biometric thresholds | strict 0.75 / medium 0.65 / loose 0.55 | strict 0.70 / medium 0.55 / loose 0.40 |
 | Classifier prompt | no explicit rule against guessing missing tokens | forbids guessing; mandates confidence |
 | `confidence` default | 0.0 | 0.8 (Gemini omits the field; 0.8 keeps the handler gate working) |
+| Intent taxonomy | 4 (`message, reminder, delegate, call`) | 12 — added `order, collection, supplier_payment, inventory, price_check, worker, summary` as `future_phase` scope |
+| Scope field | none | `scope: in_scope / future_phase / unknown` — router uses this, not intent strings |
+| Future-phase storage | n/a | new `FuturePhaseLog` table capturing transcript + intent + slots for aggregation |
 
 All production changes are in `SPEC.md`. The retroactive session record
 is in `SESSION_NOTES_2026-04-22.md`. Schema friction observed during
@@ -117,10 +139,20 @@ Run these in order. Each step should pass before moving to the next:
 
 7. **Known-good ASR cases** — send these voice commands in Hindi and
    check classification:
-   - "3 baje yaad dilana Rajesh ko call karna hai" → intent=reminder
-   - "Driver ko bolo 10 baje site par pahunche" → intent=delegate
-   - "Accountant ji ko call karo abhi" → intent=call
-   - "Supplier ko SMS bhejo, cement rate confirm karo" → intent=message
+   - "3 baje yaad dilana Rajesh ko call karna hai" → intent=reminder, scope=in_scope
+   - "Driver ko bolo 10 baje site par pahunche" → intent=delegate, scope=in_scope
+   - "Accountant ji ko call karo abhi" → intent=call, scope=in_scope
+   - "Supplier ko SMS bhejo, cement rate confirm karo" → intent=message, scope=in_scope
+
+8. **Future-phase smoke cases** — send these and check the bot
+   acknowledges with the extracted slots, does not route to a handler,
+   and creates a `FuturePhaseLog` row:
+   - "Cement kitna bacha hai" → intent=inventory, scope=future_phase
+   - "Sharma ji ko kitna paisa dena hai" → intent=supplier_payment, scope=future_phase
+   - "Rajesh ka kitna pending hai" → intent=collection, scope=future_phase, recipient_name=Rajesh
+   - "Aaj kitna business hua" → intent=summary, scope=future_phase
+
+   Quick DB check (from venv): `python -c "from app.db.session import SessionLocal; from app.db.models import FuturePhaseLog; db = SessionLocal(); [print(r.intent, r.transcript) for r in db.query(FuturePhaseLog).all()]"`
 
 ## Known issues you will likely hit
 

@@ -36,6 +36,18 @@ These are the active model and mode selections on main after the 2026-04-22 eval
 - **Biometric**: SpeechBrain `spkrec-ecapa-voxceleb` (ECAPA-TDNN), 192-dim embeddings, cosine similarity. Migrated from Resemblyzer because Resemblyzer could not separate confirmed-unrelated speakers on our test audio (margin +0.003, unusable); ECAPA-TDNN gave a +0.473 margin on the same data. Thresholds: `strict=0.70, medium=0.55, loose=0.40, off=0.0`. Weights cache to `.cache/spkrec-ecapa/` (gitignored).
 - **Classifier**: Gemini 2.5 Flash-Lite with the prompt in `app/services/classify.py`. Confidence default is 0.8 (not 0.0) because Gemini omits the field on successful classifications; fallback path in `classify_intent()` still emits 0.0 explicitly so the handler's `< 0.5` clarification gate behaves correctly.
 
+### Intent taxonomy (expanded 2026-04-22)
+
+The classifier recognises 12 intents split into two scopes. The router (`app/handlers/voice.py`) uses `IntentClassification.scope`, not the intent string, to decide whether to act.
+
+| Scope | Intents | What the bot does |
+|---|---|---|
+| `in_scope` | `message, reminder, delegate, call` | Routes to the matching handler and acts on it. |
+| `future_phase` | `order, collection, supplier_payment, inventory, price_check, worker, summary` | Recognises, logs to `FuturePhaseLog`, and replies with a specific Hindi acknowledgement. Does not act. |
+| `unknown` | `unknown` | Falls back to the clarification path. |
+
+Future-phase intents exist so the brother-shop pilot and Yogesh's testing produce a real usage histogram from day one. Priority order for building future-phase handlers comes from `FuturePhaseLog` aggregates after real usage, not from PRD guesses. Add new future-phase intents to `IntentValue`, `FUTURE_PHASE_INTENTS`, `INTENT_LABEL_HINDI`, the system prompt, and test cases.
+
 ## Known ASR failure modes worth defending against
 
 These surfaced in the 2026-04-22 evaluation and recur across independent recordings. Context engineering (contact list + shop vocabulary in the classifier prompt) is the next leverage; the ASR-side levers are mostly exhausted.

@@ -12,7 +12,7 @@ the 2026-04-22 prototype handoff and the ShopSaathi PRD review.
 The bot is a Telegram voice-command layer, not the full shop
 management system in `ShopSaathi_PRD.md`. In plain terms:
 
-**What it does:**
+**What it does today (in-scope intents):**
 - Receives a voice message on Telegram in Hindi (or Hinglish) from you.
 - Transcribes it, figures out whether you want to (a) send a message,
   (b) set a reminder, (c) delegate a task to someone, or (d) make a
@@ -25,14 +25,31 @@ management system in `ShopSaathi_PRD.md`. In plain terms:
 - Verifies your voice against an enrolled profile before acting
   (trust layer, not a security lock — configurable, can be turned off).
 
-**What it doesn't do (yet):**
-- Order management, inventory tracking, collections ledger, customer
-  records. All that is Modules 1-6 of the ShopSaathi PRD, not in this
-  prototype.
+**What it now also recognises but doesn't yet act on (future-phase intents — added 2026-04-22):**
+- `order`: "Sharma ji ko 50 bori cement ka order karo", "Rajesh ke order ka status"
+- `collection`: "Rajesh ka kitna pending hai", "Kisne paisa dena hai aaj"
+- `supplier_payment`: "Sharma ji ko kitna dena hai"
+- `inventory`: "Cement kitna bacha hai"
+- `price_check`: "Aaj gitti ka rate kya chal raha hai"
+- `worker`: "Ramu kahan hai abhi"
+- `summary`: "Aaj kitna business hua", "Haftey ka total kya hai"
+
+For any of these, the bot replies in Hindi saying it understood you
+(with the specific details it extracted) and has noted the command for
+future implementation. This is deliberate — we want to learn which
+commands you actually use most so we build those first, before
+investing in all of them. Every future-phase command you send is
+logged in the bot's database with the exact transcript, the category
+we detected, and any names/details it pulled out.
+
+**What it still doesn't do at all (full ShopSaathi features):**
+- Act on any of the future-phase intents above — they are recognised
+  and logged, not fulfilled.
 - Auto-record phone calls from customers or suppliers. That needs
-  Exotel integration (Module 9), also not in this prototype.
-- Reports for you as the remote owner.
+  Exotel integration (Module 9 in the PRD), also not in this prototype.
+- A separate app or dashboard for you as the remote owner.
 - Bill printing or Tally export (Phase 1b).
+- Nephew's or father's full operational UI from the PRD.
 
 So: think of this as the *voice operator* for a small slice of the
 full system. If it works here, we expand. If the voice layer itself

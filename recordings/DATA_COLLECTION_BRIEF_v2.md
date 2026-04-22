@@ -349,17 +349,19 @@ level — the full handling needs a conversation layer we haven't built yet.*
 
 ---
 
-### Section L: Unusual / future intents (7)
-*Not in current bot scope, but we want to know how the classifier
-degrades on them. Expected: `unknown`.*
+### Section L: Future-phase intents (7)
+*These now have their own classifier categories as of 2026-04-22 — the
+bot recognises them and logs them to `FuturePhaseLog`, but does not
+yet fulfil them. Expected intents listed alongside so the field
+recorder can verify the classifier routed correctly.*
 
-138. Aaj ka total sale kitna hua
-139. Stock check karo cement ka
-140. Kitne ki udhaari hai Ashok bhaiya ki
-141. Bill print karo
-142. Purana order repeat karo
-143. Kal ki sale ki report dikhao
-144. Shop band karne ka time bata
+138. Aaj ka total sale kitna hua — *expected: `summary`*
+139. Stock check karo cement ka — *expected: `inventory`*
+140. Kitne ki udhaari hai Ashok bhaiya ki — *expected: `collection`*
+141. Bill print karo — *expected: `unknown` (not covered by any future-phase category)*
+142. Purana order repeat karo — *expected: `order`*
+143. Kal ki sale ki report dikhao — *expected: `summary`*
+144. Shop band karne ka time bata — *expected: `summary` or `unknown`*
 
 ---
 
