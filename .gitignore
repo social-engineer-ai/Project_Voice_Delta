@@ -10,3 +10,4 @@ venv/
 *.log
 tests/last_run.json
 .cache/
+.claude/scheduled_tasks.lock

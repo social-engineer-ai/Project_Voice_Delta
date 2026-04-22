@@ -13,10 +13,55 @@ fine-tuned Gemma 2B or similar for near-zero marginal cost.
 """
 import json
 import logging
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import google.generativeai as genai
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+
+# Intent taxonomy expanded on 2026-04-22 from 4 to 12 to let the bot
+# recognise shop-domain commands beyond Phase 1's core four. The four
+# in-scope intents (message, reminder, delegate, call) are fulfilled by
+# existing handlers. The seven future-phase intents are recognised,
+# logged, and acknowledged — but not yet fulfilled. See SPEC.md
+# (intent-taxonomy-expansion section) and SESSION_NOTES_2026-04-22_intent_expansion.md.
+IntentValue = Literal[
+    "message", "reminder", "delegate", "call",
+    "order", "collection", "supplier_payment",
+    "inventory", "price_check", "worker", "summary",
+    "unknown",
+]
+
+Scope = Literal["in_scope", "future_phase", "unknown"]
+
+IN_SCOPE_INTENTS: frozenset[str] = frozenset({"message", "reminder", "delegate", "call"})
+FUTURE_PHASE_INTENTS: frozenset[str] = frozenset({
+    "order", "collection", "supplier_payment",
+    "inventory", "price_check", "worker", "summary",
+})
+
+
+def scope_for_intent(intent: str) -> str:
+    """Canonical mapping from intent string to scope. Used by tests and
+    by the router for defensive double-checking of the model's output."""
+    if intent in IN_SCOPE_INTENTS:
+        return "in_scope"
+    if intent in FUTURE_PHASE_INTENTS:
+        return "future_phase"
+    return "unknown"
+
+
+# Hindi-ish labels for the future-phase echo the router sends back.
+# Kept short. Used as a fill-in for the echo template in voice.py.
+INTENT_LABEL_HINDI: dict[str, str] = {
+    "order":             "order ke baare mein",
+    "collection":        "customer ki payment ke baare mein",
+    "supplier_payment":  "supplier ki payment ke baare mein",
+    "inventory":         "stock ke baare mein",
+    "price_check":       "rate ke baare mein",
+    "worker":            "worker ke baare mein",
+    "summary":           "business summary",
+}
 
 from app.config import settings
 
@@ -84,8 +129,22 @@ def _clean_schema(node: Any, defs: dict[str, Any]) -> Any:
 
 class IntentClassification(BaseModel):
     """The parsed structure of a shopkeeper's voice command."""
-    intent: str = Field(
-        description="One of: 'message', 'reminder', 'delegate', 'call', 'unknown'"
+    intent: IntentValue = Field(
+        description=(
+            "The primary intent. In-scope (bot acts today): 'message', "
+            "'reminder', 'delegate', 'call'. Future-phase (bot recognises, "
+            "logs, and acknowledges): 'order', 'collection', 'supplier_payment', "
+            "'inventory', 'price_check', 'worker', 'summary'. 'unknown' for "
+            "utterances that match none."
+        )
+    )
+    scope: Scope = Field(
+        default="in_scope",
+        description=(
+            "Must match the intent's category. message/reminder/delegate/call "
+            "=> 'in_scope'. order/collection/supplier_payment/inventory/"
+            "price_check/worker/summary => 'future_phase'. unknown => 'unknown'."
+        ),
     )
     recipient_name: Optional[str] = Field(
         default=None,
@@ -131,33 +190,66 @@ class IntentClassification(BaseModel):
         description="If the intent is ambiguous, what to ask the user for. Null if clear."
     )
 
+    @model_validator(mode="after")
+    def _coerce_scope_from_intent(self) -> "IntentClassification":
+        """If the caller constructed this object with a scope that
+        doesn't match its intent (e.g., tests doing
+        `IntentClassification(intent='inventory')` where the default
+        scope `in_scope` is wrong, or main.py reconstructing from a
+        pending dict that didn't have scope), silently overwrite scope
+        to the canonical mapping. The router treats scope as the
+        source of truth; keeping it consistent with intent avoids
+        surprises downstream.
+        """
+        canonical = scope_for_intent(self.intent)
+        if self.scope != canonical:
+            # Use object.__setattr__ because model_validator runs on
+            # the frozen-ish post-init instance; direct assignment
+            # works but this is explicit about intent.
+            object.__setattr__(self, "scope", canonical)
+        return self
+
 
 SYSTEM_PROMPT = """You are an intent classifier for a voice assistant used by Indian
 shopkeepers and small business owners. Input is transcribed Hindi, English, or
 mixed Hindi-English speech from a Telegram voice message.
 
-The shopkeeper will speak one of four kinds of commands:
+The shopkeeper will speak one of twelve kinds of commands, split into two groups.
+
+========== IN-SCOPE INTENTS (the bot acts on these today) ==========
 
 1. MESSAGE: Send a message to someone.
    Examples:
    - "Rajesh ko WhatsApp karo, kal delivery aayegi"
    - "Send message to supplier, cement price confirm karo"
    - "Ramu ko bolo kaam jaldi khatam kare"
-   Output: intent=message, recipient_name, channel (if mentioned), message_body
+   Output: intent=message, scope=in_scope, recipient_name, channel (if mentioned), message_body
 
-2. REMINDER: Set a reminder for yourself.
+2. REMINDER: Set a reminder for yourself. Any command with "yaad dilana",
+   "reminder lagana", or "remind me" is REMINDER regardless of what the
+   reminder is about (payments, entries, calls, inventory). The content of
+   the reminder goes into reminder_text; do not route to order/collection/
+   inventory just because the reminder mentions them.
    Examples:
    - "3 baje yaad dilana Sharma ji ko call karna hai"
    - "Kal subah reminder lagana bank jaana hai"
+   - "Kal shaam yaad dilana account ki entry karni hai"
    - "30 minute baad yaad dilana"
-   Output: intent=reminder, reminder_text, scheduled_time, recipient_name (if the reminder is about a person)
+   Output: intent=reminder, scope=in_scope, reminder_text, scheduled_time, recipient_name (if the reminder is about a person)
 
 3. DELEGATE: Tell someone to do something (a task that another person should do).
+   Any command in the form "<person> ko bolo <task>" or "Tell <person> to <task>"
+   is DELEGATE, even when the task touches business operations (orders,
+   deliveries, inventory) — the future-phase intents below are for QUERIES and
+   UPDATES about operations, not for INSTRUCTIONS to people to do operations.
    Examples:
    - "Ramu ko bolo Praveen ko call kare aur delivery confirm kare"
    - "Tell the driver to reach the site by 10 AM"
+   - "Driver ko bolo 10 baje site par pahunche"
    - "Servant ko bolo godown check kare"
-   Output: intent=delegate, recipient_name (who should do the task),
+   - "Naukar ko bolo dukaan band kare"
+   - "Chhotu ko bolo ghar jaake khaana le aaye"
+   Output: intent=delegate, scope=in_scope, recipient_name (who should do the task),
            task_description (what they should do), followup_check (what to verify later)
 
 4. CALL: Initiate a phone call to someone.
@@ -165,12 +257,90 @@ The shopkeeper will speak one of four kinds of commands:
    - "Driver ko call karo"
    - "Call Rajesh"
    - "Sharma ji ko phone lagao"
-   Output: intent=call, recipient_name
+   Output: intent=call, scope=in_scope, recipient_name
 
-If the utterance doesn't match any of these, use intent=unknown and set
-clarification_needed to a brief Hindi question asking what the user wants.
+========== FUTURE-PHASE INTENTS (the bot recognises and logs these, does not act) ==========
+
+These cover shop-management commands the bot will support in a later phase.
+Classify them correctly so we learn which ones shopkeepers actually use. Extract
+whatever slots are present (recipient_name, task_description, etc.) so the log
+captures what was asked.
+
+5. ORDER: A customer or supplier order — placing, updating, or checking status.
+   Examples:
+   - "Sharma ji ko 50 bori cement ka order kar do"
+   - "Rajesh ke order ka status kya hai"
+   - "Kal wale order mein 10 bori aur add karo"
+   Output: intent=order, scope=future_phase, recipient_name, task_description
+
+6. COLLECTION: A customer owes bhaiya money — query, status, or reminder.
+   Examples:
+   - "Rajesh ka kitna pending hai"
+   - "Kisne paisa dena hai aaj"
+   - "Sharma ji ki udhaari check karo"
+   Output: intent=collection, scope=future_phase, recipient_name (if named)
+
+7. SUPPLIER_PAYMENT: Bhaiya owes a supplier — query, status, or payment.
+   Examples:
+   - "Sharma ji ko kitna paisa dena hai"
+   - "Aaj supplier ka payment kya hai"
+   - "Cement wala ka bill clear karo"
+   Output: intent=supplier_payment, scope=future_phase, recipient_name (if named)
+
+8. INVENTORY: Stock or inventory — query, adjustment, or incoming stock.
+   Examples:
+   - "Cement kitna bacha hai"
+   - "Godown mein 10 bori cement aayi hai"
+   - "Bricks ka stock kam hai"
+   Output: intent=inventory, scope=future_phase, task_description (what the shopkeeper asked about)
+
+9. PRICE_CHECK: Rate or price query — for buying or selling.
+   Examples:
+   - "Aaj gitti ka rate kya chal raha hai"
+   - "Cement ka wholesale rate bata"
+   - "Sharma ji ka latest quote kya hai"
+   Output: intent=price_check, scope=future_phase, task_description (what product/rate)
+
+10. WORKER: Worker status, location, or attendance — beyond delegation.
+    Examples:
+    - "Ramu kahan hai abhi"
+    - "Chhotu abhi tak nahi aaya"
+    - "Aaj kitne naukar aaye hain"
+    Output: intent=worker, scope=future_phase, recipient_name (if a specific worker)
+
+11. SUMMARY: Business overview — daily, weekly, or specific metric.
+    Examples:
+    - "Aaj kitna business hua"
+    - "Is hafte ka total kya hai"
+    - "Sabse bada customer kaun hai"
+    Output: intent=summary, scope=future_phase, task_description (what the shopkeeper asked about)
+
+========== UNKNOWN ==========
+
+12. If the utterance doesn't match any of the above, use intent=unknown,
+    scope=unknown, and set clarification_needed to a brief Hindi question
+    asking what the user wants.
 
 Important rules:
+- In-scope vs future-phase disambiguation: if the utterance tells a named
+  person to do something ("X ko bolo Y", "Tell X to Y"), it is DELEGATE
+  regardless of topic. If the utterance schedules a self-reminder ("yaad
+  dilana", "remind me"), it is REMINDER regardless of what the reminder is
+  about. Future-phase intents (order/collection/supplier_payment/inventory/
+  price_check/worker/summary) are for QUERIES ("kitna", "kahan", "kya"),
+  STATUS CHECKS, and PASSIVE UPDATES, not for action-verb instructions.
+- Always set `scope` to match the intent. message/reminder/delegate/call =>
+  "in_scope". order/collection/supplier_payment/inventory/price_check/worker/
+  summary => "future_phase". unknown => "unknown". Never set scope to something
+  inconsistent with intent.
+- Prefer a specific intent over `unknown` when the utterance contains a clear
+  action verb (karo, bolo, bhejo, dilana, pahunchao) or a clear query word
+  (kitna, kahan, kya, kyun). Use `unknown` only when the utterance is
+  genuinely off-topic ("namaste", "haan theek hai") or truly unparseable.
+- For future-phase intents, populate recipient_name and task_description when
+  they are clear from the transcript. Other slot fields (channel, scheduled_time,
+  message_body, reminder_text) stay null for future-phase intents unless the
+  shopkeeper truly named them.
 - Return recipient names exactly as spoken (don't translate, don't guess phonetic
   variants). The system will fuzzy-match them against the contact database separately.
 - For Hindi relative time expressions: "kal" = tomorrow, "abhi" = now,
@@ -218,11 +388,25 @@ def classify_intent(transcript: str) -> IntentClassification:
     try:
         response = model.generate_content(transcript)
         data = json.loads(response.text)
-        return IntentClassification(**data)
+        result = IntentClassification(**data)
+        # Defensive: if the model emitted an intent that doesn't match
+        # the scope it also emitted, trust the intent string and
+        # overwrite scope using the canonical mapping. Keeps the router
+        # safe even when prompt drift causes the two fields to disagree.
+        canonical_scope = scope_for_intent(result.intent)
+        if result.scope != canonical_scope:
+            logger.warning(
+                "Scope/intent mismatch from model: intent=%s scope=%s; "
+                "overwriting scope to %s",
+                result.intent, result.scope, canonical_scope,
+            )
+            result.scope = canonical_scope
+        return result
     except Exception as e:
         logger.exception(f"Gemini classification failed: {e}")
         return IntentClassification(
             intent="unknown",
+            scope="unknown",
             confidence=0.0,
             clarification_needed="Samajh nahin aaya, dobara boliye."
         )

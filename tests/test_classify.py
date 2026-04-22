@@ -54,6 +54,15 @@ CATEGORIES = [
     "scheduled_time_shaam_ko",
     "ambiguous_clarification",
     "off_topic_no_match",
+    # Future-phase categories added 2026-04-22 when the intent taxonomy grew
+    # from 4 to 12. Each has 2 representative cases. See SPEC.md for scope.
+    "future_order",
+    "future_collection",
+    "future_supplier_payment",
+    "future_inventory",
+    "future_price_check",
+    "future_worker",
+    "future_summary",
 ]
 
 
@@ -278,6 +287,115 @@ TEST_CASES: list[dict] = [
         "categories": ["off_topic_no_match"],
         "expected_intent": "unknown",
     },
+
+    # ---- Future-phase intent cases (added 2026-04-22) ----
+    # These test that the 7 new shop-domain intents are correctly
+    # recognised. Hard-asserts intent + scope. Body extraction is not
+    # required for future-phase cases — slot extraction quality will
+    # get attention after real usage data accumulates.
+
+    # future_order
+    {
+        "input": "Sharma ji ko 50 bori cement ka order kar do",
+        "categories": ["future_order", "honorifics"],
+        "expected_intent": "order",
+        "expected_scope": "future_phase",
+        "expected_recipient": "Sharma",
+    },
+    {
+        "input": "Rajesh ke order ka status kya hai",
+        "categories": ["future_order"],
+        "expected_intent": "order",
+        "expected_scope": "future_phase",
+        "expected_recipient": "Rajesh",
+    },
+
+    # future_collection
+    {
+        "input": "Rajesh ka kitna pending hai",
+        "categories": ["future_collection"],
+        "expected_intent": "collection",
+        "expected_scope": "future_phase",
+        "expected_recipient": "Rajesh",
+    },
+    {
+        "input": "Kisne paisa dena hai aaj",
+        "categories": ["future_collection"],
+        "expected_intent": "collection",
+        "expected_scope": "future_phase",
+    },
+
+    # future_supplier_payment
+    {
+        "input": "Sharma ji ko kitna paisa dena hai",
+        "categories": ["future_supplier_payment", "honorifics"],
+        "expected_intent": "supplier_payment",
+        "expected_scope": "future_phase",
+        "expected_recipient": "Sharma",
+    },
+    {
+        "input": "Aaj supplier ka payment kya hai",
+        "categories": ["future_supplier_payment", "role_only_references"],
+        "expected_intent": "supplier_payment",
+        "expected_scope": "future_phase",
+    },
+
+    # future_inventory
+    {
+        "input": "Cement kitna bacha hai",
+        "categories": ["future_inventory"],
+        "expected_intent": "inventory",
+        "expected_scope": "future_phase",
+    },
+    {
+        "input": "Godown mein 10 bori cement aayi hai",
+        "categories": ["future_inventory"],
+        "expected_intent": "inventory",
+        "expected_scope": "future_phase",
+    },
+
+    # future_price_check
+    {
+        "input": "Aaj gitti ka rate kya chal raha hai",
+        "categories": ["future_price_check"],
+        "expected_intent": "price_check",
+        "expected_scope": "future_phase",
+    },
+    {
+        "input": "Cement ka wholesale rate bata",
+        "categories": ["future_price_check"],
+        "expected_intent": "price_check",
+        "expected_scope": "future_phase",
+    },
+
+    # future_worker
+    {
+        "input": "Ramu kahan hai abhi",
+        "categories": ["future_worker"],
+        "expected_intent": "worker",
+        "expected_scope": "future_phase",
+        "expected_recipient": "Ramu",
+    },
+    {
+        "input": "Aaj kitne naukar aaye hain",
+        "categories": ["future_worker", "role_only_references"],
+        "expected_intent": "worker",
+        "expected_scope": "future_phase",
+    },
+
+    # future_summary
+    {
+        "input": "Aaj kitna business hua",
+        "categories": ["future_summary"],
+        "expected_intent": "summary",
+        "expected_scope": "future_phase",
+    },
+    {
+        "input": "Is hafte ka total kya hai",
+        "categories": ["future_summary"],
+        "expected_intent": "summary",
+        "expected_scope": "future_phase",
+    },
 ]
 
 
@@ -289,16 +407,20 @@ def evaluate_case(case: dict) -> dict:
     expected_intent = case["expected_intent"]
     expected_recipient = case.get("expected_recipient")
 
+    expected_scope = case.get("expected_scope")
+
     record: dict = {
         "input": case["input"],
         "categories": list(case["categories"]),
         "expected": {
             "intent": expected_intent,
             "recipient": expected_recipient,
+            "scope": expected_scope,
         },
         "actual": None,
         "intent_passed": False,
         "recipient_passed": None,
+        "scope_passed": None,
         "body_passed": None,
         "latency_ms": None,
         "error": None,
@@ -310,6 +432,9 @@ def evaluate_case(case: dict) -> dict:
         record["latency_ms"] = int((time.perf_counter() - t0) * 1000)
         record["actual"] = result.model_dump()
         record["intent_passed"] = result.intent == expected_intent
+
+        if expected_scope is not None:
+            record["scope_passed"] = result.scope == expected_scope
 
         if expected_recipient is not None and expected_intent != "unknown":
             actual_rec = (result.recipient_name or "").lower()
@@ -388,6 +513,25 @@ def build_body_populated(records: list[dict]) -> dict[str, dict]:
             if bucket["total"] else 0.0
         )
     return rollup
+
+
+def build_scope_rollup(records: list[dict]) -> dict:
+    """Rollup of scope accuracy on cases that declared expected_scope.
+    Skips cases that didn't declare one (older cases added before the
+    2026-04-22 expansion). Reported in the JSON + stdout summary."""
+    total = 0
+    passed = 0
+    for r in records:
+        if r.get("scope_passed") is None:
+            continue
+        total += 1
+        if r["scope_passed"]:
+            passed += 1
+    return {
+        "count": total,
+        "passed": passed,
+        "accuracy": round(passed / total, 3) if total else 0.0,
+    }
 
 
 def build_overall(records: list[dict]) -> dict:
@@ -485,6 +629,16 @@ def print_body_populated_block(body_rollup: dict[str, dict]) -> None:
         print(f"  {intent_name.ljust(width)}  {b['populated']}/{b['total']}  {pct:5.1f}%")
 
 
+def print_scope_block(scope_rollup: dict) -> None:
+    if scope_rollup["count"] == 0:
+        return
+    pct = scope_rollup["accuracy"] * 100
+    print(
+        f"\nScope accuracy (on cases asserting expected_scope): "
+        f"{scope_rollup['passed']}/{scope_rollup['count']} ({pct:.1f}%)"
+    )
+
+
 def print_overall_block(overall: dict) -> None:
     pct = overall["accuracy"] * 100
     print(f"\nOverall: {overall['passed']}/{overall['count']} ({pct:.1f}%)")
@@ -504,12 +658,14 @@ def run() -> int:
     per_intent = build_per_intent(records)
     per_category = build_per_category(records)
     body_populated = build_body_populated(records)
+    scope_rollup = build_scope_rollup(records)
     overall = build_overall(records)
 
     print("\n" + "=" * 60)
     print_per_intent_block(per_intent)
     print_per_category_block(per_category)
     print_body_populated_block(body_populated)
+    print_scope_block(scope_rollup)
     print_overall_block(overall)
 
     report = {
@@ -518,6 +674,7 @@ def run() -> int:
         "per_intent": per_intent,
         "per_category": per_category,
         "body_populated": body_populated,
+        "scope_rollup": scope_rollup,
         "overall": overall,
     }
     REPORT_PATH.write_text(

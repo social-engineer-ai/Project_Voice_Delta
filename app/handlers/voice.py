@@ -13,12 +13,16 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from app.db.session import SessionLocal
-from app.db.models import User
+from app.db.models import FuturePhaseLog, User
 from app.handlers.call import handle_call_intent
 from app.handlers.delegate import handle_delegate_intent
 from app.handlers.message import handle_message_intent
 from app.handlers.reminder import handle_reminder_intent
-from app.services.classify import classify_intent
+from app.services.classify import (
+    INTENT_LABEL_HINDI,
+    IntentClassification,
+    classify_intent,
+)
 from app.services.transcribe import transcribe_audio
 from app.services.verify_speaker import verify_speaker
 
@@ -158,12 +162,25 @@ async def handle_voice_message(
             f"recipient={intent.recipient_name}, body={body_label}"
         )
 
-        if intent.confidence < 0.5 or intent.intent == "unknown":
+        if intent.scope == "unknown" or intent.confidence < 0.5:
             msg = intent.clarification_needed or "Samajh nahi aaya. Kya karna hai?"
             await update.message.reply_text(msg)
             return
 
-        # Step 5: Route to handler
+        # Step 5a: Future-phase intents — log and acknowledge, don't act.
+        # The 7 shop-domain intents (order, collection, inventory, ...) are
+        # recognised so the brother-shop pilot produces a real usage
+        # histogram, but the bot does not fulfill them yet. The router
+        # here is the single place that decides recognise-vs-act.
+        if intent.scope == "future_phase":
+            _log_future_phase(fresh_user.id, transcript, intent)
+            await update.message.reply_text(
+                _future_phase_echo(intent),
+                parse_mode="Markdown",
+            )
+            return
+
+        # Step 5b: In-scope intents — route to the existing handler dict.
         handlers = {
             "message": handle_message_intent,
             "reminder": handle_reminder_intent,
@@ -172,6 +189,12 @@ async def handle_voice_message(
         }
         handler = handlers.get(intent.intent)
         if not handler:
+            # Should not happen if scope=="in_scope", but guards against
+            # prompt drift emitting an unrecognised intent string.
+            logger.warning(
+                "In-scope intent with no handler: %s (transcript=%r)",
+                intent.intent, transcript,
+            )
             await update.message.reply_text(
                 f"Intent '{intent.intent}' abhi support nahi hai."
             )
@@ -205,9 +228,17 @@ async def handle_text_message(
         f"Text intent: {intent.intent} (confidence {intent.confidence:.2f})"
     )
 
-    if intent.confidence < 0.5 or intent.intent == "unknown":
+    if intent.scope == "unknown" or intent.confidence < 0.5:
         msg = intent.clarification_needed or "Samajh nahi aaya. Kya karna hai?"
         await update.message.reply_text(msg)
+        return
+
+    if intent.scope == "future_phase":
+        _log_future_phase(user.id, text, intent)
+        await update.message.reply_text(
+            _future_phase_echo(intent),
+            parse_mode="Markdown",
+        )
         return
 
     handlers = {
@@ -219,3 +250,57 @@ async def handle_text_message(
     handler = handlers.get(intent.intent)
     if handler:
         await handler(update, context, user, intent)
+
+
+# --- Helpers for future-phase routing ---
+
+def _future_phase_echo(intent: IntentClassification) -> str:
+    """Build the Hindi acknowledgement sent back when a future-phase
+    intent is recognised. The shopkeeper sees what the bot understood
+    so they know whether the classification was right, plus a clear
+    "not yet" signal so they don't wait for an action.
+    """
+    label = INTENT_LABEL_HINDI.get(intent.intent, intent.intent)
+    parts = [f"Samajh gaya — aapne *{label}* poocha."]
+    if intent.recipient_name:
+        parts.append(f"Naam: {intent.recipient_name}.")
+    if intent.task_description:
+        parts.append(f"Details: {intent.task_description}.")
+    parts.append("Abhi ye feature build ho raha hai. Note kar liya hai.")
+    return " ".join(parts)
+
+
+def _log_future_phase(
+    user_id: int, transcript: str, intent: IntentClassification
+) -> None:
+    """Persist a future-phase recognition to FuturePhaseLog. Failures
+    are logged but never raised — logging must not block the user-
+    facing acknowledgement.
+    """
+    db = SessionLocal()
+    try:
+        # Dump the full IntentClassification into extracted_slots so the
+        # original model output is preserved for later aggregation/inspection.
+        slots_dict = intent.model_dump(mode="json")
+        # Drop keys we already have in dedicated columns.
+        for k in ("intent", "scope", "confidence", "recipient_name"):
+            slots_dict.pop(k, None)
+        row = FuturePhaseLog(
+            user_id=user_id,
+            transcript=transcript,
+            intent=intent.intent,
+            scope=intent.scope,
+            confidence=intent.confidence,
+            recipient_name=intent.recipient_name,
+            extracted_slots=slots_dict,
+        )
+        db.add(row)
+        db.commit()
+        logger.info(
+            "FuturePhaseLog: user=%s intent=%s recipient=%s",
+            user_id, intent.intent, intent.recipient_name,
+        )
+    except Exception as e:
+        logger.exception(f"Failed to log future-phase intent: {e}")
+    finally:
+        db.close()

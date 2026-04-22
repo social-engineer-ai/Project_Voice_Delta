@@ -93,6 +93,35 @@ class Task(Base):
     )
 
 
+class FuturePhaseLog(Base):
+    """A voice command whose intent the classifier recognised but the bot
+    cannot yet fulfill.
+
+    Added on 2026-04-22 alongside the 4-to-12 intent taxonomy expansion.
+    The seven future-phase intents (order, collection, supplier_payment,
+    inventory, price_check, worker, summary) are logged here with the
+    full classification so we can aggregate usage over the brother-shop
+    pilot and use real frequency data — not PRD assumptions — to
+    prioritise which ShopSaathi-PRD module to build next.
+
+    extracted_slots carries the full IntentClassification dict (minus
+    the intent string, which is denormalised to its own column for
+    indexed queries). Useful for inspecting what the model pulled out
+    of commands we can't yet act on.
+    """
+    __tablename__ = "future_phase_logs"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    transcript = Column(Text, nullable=False)
+    intent = Column(String(32), nullable=False, index=True)
+    scope = Column(String(16), nullable=False)
+    confidence = Column(Float, nullable=True)
+    recipient_name = Column(String(128), nullable=True)
+    extracted_slots = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
 class VoiceProfile(Base):
     """An enrolled voice sample for speaker verification.
 
