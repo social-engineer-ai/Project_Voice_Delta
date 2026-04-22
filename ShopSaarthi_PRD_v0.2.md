@@ -345,3 +345,8 @@ When a Claude Code session picks up this PRD to implement Phase 1 features, it s
 - **Plan mode** for multi-step features like voice enrollment flow that touch several files
 
 The author prefers grounded, restrained implementation without grandiosity. No em-dashes in code comments. Plain professional language. Understated tone. Code should be readable by a mid-level engineer maintaining the project after the author has moved to other work.
+
+
+Future aspects
+
+Model migration to Gemma 4 (26B MoE). Apache 2.0 licensed, better economics at scale, fine-tunable on accumulated corpus. Evaluation trigger: when monthly classifier call volume exceeds 50,000 calls (roughly 80+ active shops), or when Flash-Lite pricing changes adversely, or when accumulated fine-tuning data from 50+ shops is available. Also evaluate E2B/E4B sizes for potential on-device deployment in markets with unreliable connectivity.
