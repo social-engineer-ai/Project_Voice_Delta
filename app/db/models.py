@@ -93,6 +93,74 @@ class Task(Base):
     )
 
 
+class Product(Base):
+    """A sellable item in the shop's catalog.
+
+    Added on the `Dates` branch for the bill-generation prototype
+    (2026-04-22). Seeded with dates varieties in
+    `scripts/seed_dates_products.py`; other shops seed their own.
+
+    `aliases` holds alternate spellings and the ASR-drift variants the
+    classifier is likely to produce ("date crown fardh" vs "Date crown
+    fard"). `BillItem.product_name` is free-text and fuzzy-matched
+    against `Product.name` + `Product.aliases` at bill creation time;
+    an unmatched product still generates a bill line, it just won't
+    carry a product_id.
+    """
+    __tablename__ = "products"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255), nullable=False, unique=True, index=True)
+    aliases = Column(JSON, default=list)
+    default_unit = Column(String(32), nullable=True)
+    gst_rate = Column(Float, default=18.0)
+    is_active = Column(Integer, default=1)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class Bill(Base):
+    """A bill / sales invoice header. Line items live on BillItem.
+
+    Added on the `Dates` branch for the bill-generation prototype.
+    The prototype doesn't implement amendment/cancellation — status
+    column exists to let a later revision add that without migration.
+    """
+    __tablename__ = "bills"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    bill_number = Column(String(32), nullable=False, unique=True, index=True)
+    customer_name = Column(String(255), nullable=False)
+    bill_date = Column(DateTime, default=datetime.utcnow, index=True)
+    subtotal = Column(Float, nullable=False, default=0.0)
+    tax_amount = Column(Float, nullable=False, default=0.0)
+    total = Column(Float, nullable=False, default=0.0)
+    raw_transcript = Column(Text, nullable=True)
+    status = Column(String(16), default="created")
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    items = relationship("BillItem", back_populates="bill", cascade="all, delete-orphan")
+
+
+class BillItem(Base):
+    """One line on a bill."""
+    __tablename__ = "bill_items"
+
+    id = Column(Integer, primary_key=True)
+    bill_id = Column(Integer, ForeignKey("bills.id"), nullable=False, index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=True)
+    product_name = Column(String(255), nullable=False)
+    quantity = Column(Float, nullable=False)
+    unit = Column(String(32), nullable=True)
+    rate = Column(Float, nullable=False)
+    amount = Column(Float, nullable=False)
+    gst_rate = Column(Float, default=18.0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    bill = relationship("Bill", back_populates="items")
+
+
 class FuturePhaseLog(Base):
     """A voice command whose intent the classifier recognised but the bot
     cannot yet fulfill.

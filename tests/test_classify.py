@@ -63,6 +63,10 @@ CATEGORIES = [
     "future_price_check",
     "future_worker",
     "future_summary",
+    # Bill intent added on the Dates branch (2026-04-22) — bill-generation
+    # prototype. Scope=in_scope, exercises nested bill_items extraction.
+    "bill_single_item",
+    "bill_multi_item",
 ]
 
 
@@ -395,6 +399,38 @@ TEST_CASES: list[dict] = [
         "categories": ["future_summary"],
         "expected_intent": "summary",
         "expected_scope": "future_phase",
+    },
+
+    # ---- Bill intent cases (added 2026-04-22, Dates branch) ----
+    # These test nested bill_items extraction.
+
+    {
+        "input": "Rajesh ke liye 5 carton Date crown fard bill banao, rate 3000 per carton",
+        "categories": ["bill_single_item"],
+        "expected_intent": "bill",
+        "expected_scope": "in_scope",
+        "expected_recipient": "Rajesh",
+    },
+    {
+        "input": "Bill for Mukesh: 10 cartons Medjool dates at 4200 per carton",
+        "categories": ["bill_single_item"],
+        "expected_intent": "bill",
+        "expected_scope": "in_scope",
+        "expected_recipient": "Mukesh",
+    },
+    {
+        "input": "Sharma ji ka bill banao, 3 carton Date crown premium fard rate 3500, aur 2 box Ajwa rate 2800",
+        "categories": ["bill_multi_item", "honorifics"],
+        "expected_intent": "bill",
+        "expected_scope": "in_scope",
+        "expected_recipient": "Sharma",
+    },
+    {
+        "input": "Suresh ke liye 4 box Mabroom 2800, aur 2 carton Kimia 3200 ka bill banao",
+        "categories": ["bill_multi_item"],
+        "expected_intent": "bill",
+        "expected_scope": "in_scope",
+        "expected_recipient": "Suresh",
     },
 ]
 

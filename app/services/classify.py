@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field, model_validator
 # (intent-taxonomy-expansion section) and SESSION_NOTES_2026-04-22_intent_expansion.md.
 IntentValue = Literal[
     "message", "reminder", "delegate", "call",
+    "bill",
     "order", "collection", "supplier_payment",
     "inventory", "price_check", "worker", "summary",
     "unknown",
@@ -34,7 +35,7 @@ IntentValue = Literal[
 
 Scope = Literal["in_scope", "future_phase", "unknown"]
 
-IN_SCOPE_INTENTS: frozenset[str] = frozenset({"message", "reminder", "delegate", "call"})
+IN_SCOPE_INTENTS: frozenset[str] = frozenset({"message", "reminder", "delegate", "call", "bill"})
 FUTURE_PHASE_INTENTS: frozenset[str] = frozenset({
     "order", "collection", "supplier_payment",
     "inventory", "price_check", "worker", "summary",
@@ -82,11 +83,51 @@ _GEMINI_DISALLOWED_KEYS = frozenset(
 )
 
 
+# Fields that must appear in every Gemini response, even as null, so the
+# model doesn't silently drop them. Pydantic defaults still apply on the
+# receiving side — this is purely a hint to Gemini that the key must be
+# present in the JSON output. Added on the Dates branch (2026-04-22)
+# after observing Flash-Lite omit optional fields like bill_items and
+# recipient_name even with very explicit prompt instructions.
+_FORCE_REQUIRED_TOP_LEVEL: frozenset[str] = frozenset({
+    "intent", "scope", "recipient_name", "bill_items", "confidence",
+})
+
+# Fields inside bill_items[] that must also be present. Otherwise Gemini
+# drops rate/quantity/unit on the nested object even when the top-level
+# bill_items key is required.
+_FORCE_REQUIRED_BILL_ITEM: frozenset[str] = frozenset({
+    "product_name", "quantity", "unit", "rate",
+})
+
+
 def _to_gemini_schema(model_cls: type[BaseModel]) -> dict[str, Any]:
     """Return a Gemini-Schema-compatible dict derived from a Pydantic model."""
     raw = model_cls.model_json_schema()
     defs = raw.get("$defs", {})
-    return _clean_schema(raw, defs)
+    cleaned = _clean_schema(raw, defs)
+    # Force the high-value fields to be required in the response JSON.
+    # If the field exists in properties, add it to required. Don't
+    # invent requireds for fields that don't exist on the schema.
+    if isinstance(cleaned, dict) and "properties" in cleaned:
+        props = cleaned["properties"]
+        existing = set(cleaned.get("required") or [])
+        for field in _FORCE_REQUIRED_TOP_LEVEL:
+            if field in props:
+                existing.add(field)
+        cleaned["required"] = sorted(existing)
+        # Also mark the nested BillItem fields as required.
+        bill_items = props.get("bill_items")
+        if isinstance(bill_items, dict):
+            items = bill_items.get("items")
+            if isinstance(items, dict) and "properties" in items:
+                item_props = items["properties"]
+                item_req = set(items.get("required") or [])
+                for field in _FORCE_REQUIRED_BILL_ITEM:
+                    if field in item_props:
+                        item_req.add(field)
+                items["required"] = sorted(item_req)
+    return cleaned
 
 
 def _clean_schema(node: Any, defs: dict[str, Any]) -> Any:
@@ -126,6 +167,32 @@ def _clean_schema(node: Any, defs: dict[str, Any]) -> Any:
 
 # Structured output schemas. We define these as Pydantic for runtime validation,
 # and pass a JSON schema to Gemini for structured output.
+
+
+class BillItemExtracted(BaseModel):
+    """One line item extracted from a voice bill command. Added on the
+    `Dates` branch (2026-04-22) for the bill-generation prototype."""
+    product_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "The product as spoken (e.g., 'Date crown fard', 'Ajwa dates'). "
+            "Downstream will fuzzy-match this against the shop's product "
+            "catalog."
+        ),
+    )
+    quantity: Optional[float] = Field(
+        default=None,
+        description="Numeric quantity (e.g., 5 for '5 carton').",
+    )
+    unit: Optional[str] = Field(
+        default=None,
+        description="Unit: carton, box, kg, packet, piece, bori, etc.",
+    )
+    rate: Optional[float] = Field(
+        default=None,
+        description="Price per unit in INR. Null if the speaker did not state one.",
+    )
+
 
 class IntentClassification(BaseModel):
     """The parsed structure of a shopkeeper's voice command."""
@@ -173,6 +240,14 @@ class IntentClassification(BaseModel):
     followup_check: Optional[str] = Field(
         default=None,
         description="For 'delegate': what to follow up on later, if implied. Example: 'check if Ramu called Praveen'."
+    )
+    bill_items: Optional[list[BillItemExtracted]] = Field(
+        default=None,
+        description=(
+            "For 'bill' intent only: up to 3 line items extracted from the "
+            "voice command. Each has product_name, quantity, unit, rate. "
+            "Null for every other intent."
+        ),
     )
     confidence: float = Field(
         default=0.8,
@@ -258,6 +333,60 @@ The shopkeeper will speak one of twelve kinds of commands, split into two groups
    - "Call Rajesh"
    - "Sharma ji ko phone lagao"
    Output: intent=call, scope=in_scope, recipient_name
+
+5. BILL: Create a sales bill / invoice for a customer. Triggered by
+   phrases like "bill banao", "bill bana do", "invoice banao", "bill
+   for <name>". You MUST populate both recipient_name (the customer)
+   AND bill_items (at least one line item with product_name, quantity,
+   unit, and rate) when you return intent=bill. If either cannot be
+   extracted clearly, return intent=unknown instead — do not return
+   intent=bill with null recipient_name or empty bill_items.
+
+   Extract the customer name into recipient_name, and each line item
+   into bill_items[] with product_name, quantity, unit, rate. Maximum
+   3 items per command. Numbers spoken as Hindi ("paanch", "das") or
+   English ("5", "ten") should be normalized to digits in quantity
+   and rate.
+
+   Example response shapes (for reference — the model must always emit
+   valid JSON matching the schema, not these narratives):
+
+   Input: "Rajesh ke liye 5 carton Date crown fard bill banao, rate 3000 per carton"
+   Output JSON:
+   {
+     "intent": "bill",
+     "scope": "in_scope",
+     "recipient_name": "Rajesh",
+     "bill_items": [
+       {"product_name": "Date crown fard", "quantity": 5, "unit": "carton", "rate": 3000}
+     ],
+     "confidence": 0.95
+   }
+
+   Input: "Sharma ji ka bill banao: 3 carton Date crown premium fard at 3500, aur 2 box Ajwa at 2800"
+   Output JSON:
+   {
+     "intent": "bill",
+     "scope": "in_scope",
+     "recipient_name": "Sharma ji",
+     "bill_items": [
+       {"product_name": "Date crown premium fard", "quantity": 3, "unit": "carton", "rate": 3500},
+       {"product_name": "Ajwa", "quantity": 2, "unit": "box", "rate": 2800}
+     ],
+     "confidence": 0.95
+   }
+
+   Input: "Bill for Mukesh: 10 cartons Medjool dates at 4200 per carton"
+   Output JSON:
+   {
+     "intent": "bill",
+     "scope": "in_scope",
+     "recipient_name": "Mukesh",
+     "bill_items": [
+       {"product_name": "Medjool dates", "quantity": 10, "unit": "carton", "rate": 4200}
+     ],
+     "confidence": 0.9
+   }
 
 ========== FUTURE-PHASE INTENTS (the bot recognises and logs these, does not act) ==========
 
@@ -348,8 +477,12 @@ Important rules:
 - If the user mixes intents in one utterance, pick the primary one and note the
   rest in clarification_needed.
 - Populate exactly one of message_body, reminder_text, task_description based on
-  the intent. The other two must be null. For 'call' and 'unknown', all three
-  must be null.
+  the intent. The other two must be null. For 'call', 'bill', and 'unknown',
+  all three must be null.
+- bill_items must be populated ONLY when intent=bill. For every other intent
+  (including future-phase intents like inventory or order that mention a
+  product), bill_items must be null — those intents use task_description for
+  the product/query text, not bill_items.
 - Missing is missing. If a number, time, or proper noun is not clearly present
   in the transcript, leave the corresponding field null. Do not infer a plausible
   value from context. Example: if the transcript is "Hours remind me to call

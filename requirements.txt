@@ -23,6 +23,9 @@ torch==2.11.0
 soundfile==0.13.1
 imageio-ffmpeg==0.6.0
 
+# Bill generation (Dates branch prototype — PDF rendering).
+reportlab==4.4.10
+
 # librosa is kept for noise/quality tooling in scripts/ even though it is
 # not on the production request path.
 librosa==0.11.0
