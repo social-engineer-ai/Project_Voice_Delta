@@ -14,7 +14,7 @@ from telegram.ext import ContextTypes
 
 from app.db.session import SessionLocal
 from app.db.models import FuturePhaseLog, User
-from app.handlers.bill import handle_bill_intent
+from app.handlers.bill import handle_bill_intent, maybe_complete_bill_add
 from app.handlers.call import handle_call_intent
 from app.handlers.delegate import handle_delegate_intent
 from app.handlers.message import handle_message_intent
@@ -65,6 +65,12 @@ async def handle_voice_message(
     username = update.effective_user.username
 
     user = await _get_or_create_user(chat_id, username)
+
+    # A fresh voice message invalidates any pending password-gated
+    # catalog-add — the shopkeeper is evidently choosing to re-speak
+    # instead of confirming the earlier bill.
+    if context.user_data.pop("pending_bill_add", None) is not None:
+        logger.info("New voice message cleared pending catalog-add state.")
 
     # Step 1: Download the voice file
     voice = update.message.voice
@@ -221,6 +227,14 @@ async def handle_text_message(
 
     text = update.message.text.strip()
     if not text:
+        return
+
+    # If a bill is waiting on the catalog-add password, handle that
+    # before running the classifier. maybe_complete_bill_add returns
+    # True if it handled the message fully (password matched + bill
+    # created), False to continue normal classification (wrong
+    # password, or no pending state).
+    if await maybe_complete_bill_add(update, context, user):
         return
 
     context.user_data["last_transcript"] = text

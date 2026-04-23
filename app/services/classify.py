@@ -90,7 +90,8 @@ _GEMINI_DISALLOWED_KEYS = frozenset(
 # after observing Flash-Lite omit optional fields like bill_items and
 # recipient_name even with very explicit prompt instructions.
 _FORCE_REQUIRED_TOP_LEVEL: frozenset[str] = frozenset({
-    "intent", "scope", "recipient_name", "bill_items", "confidence",
+    "intent", "scope", "recipient_name", "bill_items",
+    "transporter", "bhada", "confidence",
 })
 
 # Fields inside bill_items[] that must also be present. Otherwise Gemini
@@ -249,6 +250,23 @@ class IntentClassification(BaseModel):
             "Null for every other intent."
         ),
     )
+    transporter: Optional[str] = Field(
+        default=None,
+        description=(
+            "For 'bill' intent only: the transporter's name as spoken. "
+            "Transliterate to Latin script. If the speaker says self-pickup "
+            "('self', 'khud', 'apna'), use the literal 'Self'. "
+            "Null for every other intent."
+        ),
+    )
+    bhada: Optional[float] = Field(
+        default=None,
+        description=(
+            "For 'bill' intent only: the freight / transport charge in INR "
+            "(bhada / bhaada / kiraya). Zero if the speaker says zero or "
+            "says it's included / no charge. Null for every other intent."
+        ),
+    )
     confidence: float = Field(
         default=0.8,
         description="0.0 to 1.0, how confident the classification is."
@@ -336,11 +354,13 @@ The shopkeeper will speak one of twelve kinds of commands, split into two groups
 
 5. BILL: Create a sales bill / invoice for a customer. Triggered by
    phrases like "bill banao", "bill bana do", "invoice banao", "bill
-   for <name>". You MUST populate both recipient_name (the customer)
-   AND bill_items (at least one line item with product_name, quantity,
-   unit, and rate) when you return intent=bill. If either cannot be
-   extracted clearly, return intent=unknown instead — do not return
-   intent=bill with null recipient_name or empty bill_items.
+   for <name>". You MUST populate all four of: recipient_name (the
+   customer), bill_items (at least one line item with product_name,
+   quantity, unit, and rate), transporter (who moves the goods), and
+   bhada (freight charge in INR) when you return intent=bill. If any
+   of these cannot be extracted clearly, still return intent=bill with
+   the fields you have and leave the missing ones null — the
+   downstream handler will ask the speaker for the missing pieces.
 
    IMPORTANT FOR BILL: recipient_name and every bill_items[].product_name
    must be written in LATIN SCRIPT (English transliteration), even when
@@ -376,7 +396,7 @@ The shopkeeper will speak one of twelve kinds of commands, split into two groups
    Example response shapes (for reference — the model must always emit
    valid JSON matching the schema, not these narratives):
 
-   Input: "Rajesh ke liye 5 carton Date crown fard bill banao, rate 3000 per carton"
+   Input: "Rajesh ke liye 5 carton Date crown fard bill banao, rate 3000 per carton, transporter Sharma Transport, bhada 500"
    Output JSON:
    {
      "intent": "bill",
@@ -385,10 +405,12 @@ The shopkeeper will speak one of twelve kinds of commands, split into two groups
      "bill_items": [
        {"product_name": "Date crown fard", "quantity": 5, "unit": "carton", "rate": 3000}
      ],
+     "transporter": "Sharma Transport",
+     "bhada": 500,
      "confidence": 0.95
    }
 
-   Input: "Sharma ji ka bill banao: 3 carton Date crown premium fard at 3500, aur 2 box Ajwa at 2800"
+   Input: "Sharma ji ka bill banao: 3 carton Date crown premium fard at 3500, aur 2 box Ajwa at 2800, bhada 800 Maruti transport se"
    Output JSON:
    {
      "intent": "bill",
@@ -398,10 +420,12 @@ The shopkeeper will speak one of twelve kinds of commands, split into two groups
        {"product_name": "Date crown premium fard", "quantity": 3, "unit": "carton", "rate": 3500},
        {"product_name": "Ajwa", "quantity": 2, "unit": "box", "rate": 2800}
      ],
+     "transporter": "Maruti Transport",
+     "bhada": 800,
      "confidence": 0.95
    }
 
-   Input: "Bill for Mukesh: 10 cartons Medjool dates at 4200 per carton"
+   Input: "Bill for Mukesh: 10 cartons Medjool dates at 4200 per carton, self pickup bhada zero"
    Output JSON:
    {
      "intent": "bill",
@@ -410,6 +434,23 @@ The shopkeeper will speak one of twelve kinds of commands, split into two groups
      "bill_items": [
        {"product_name": "Medjool dates", "quantity": 10, "unit": "carton", "rate": 4200}
      ],
+     "transporter": "Self",
+     "bhada": 0,
+     "confidence": 0.9
+   }
+
+   Input: "Bunty ka bill 5 Ajwa 2100 aur 3 Tetco 2200"  (transporter + bhada not mentioned)
+   Output JSON:
+   {
+     "intent": "bill",
+     "scope": "in_scope",
+     "recipient_name": "Bunty",
+     "bill_items": [
+       {"product_name": "Ajwa", "quantity": 5, "unit": "carton", "rate": 2100},
+       {"product_name": "Tetco", "quantity": 3, "unit": "carton", "rate": 2200}
+     ],
+     "transporter": null,
+     "bhada": null,
      "confidence": 0.9
    }
 

@@ -31,6 +31,13 @@ logger = logging.getLogger(__name__)
 # typical ASR drift on dates names.
 PRODUCT_MATCH_THRESHOLD = 70
 
+# Hardcoded password for catalog-add confirmation. Not production auth
+# — this is a demo convenience so only the shopkeeper (who knows the
+# password) can mint new catalog rows by voice. For production, replace
+# with a per-user PIN stored against User, or with admin-only Telegram
+# bot commands.
+CATALOG_ADD_PASSWORD = "121"
+
 
 def _next_bill_number(db) -> str:
     """Simple monotonic bill number: DEMO-YYYYMMDD-###."""
@@ -159,42 +166,81 @@ async def handle_bill_intent(
         )
         return
 
+    # Transporter and bhada are required to create a bill. Ask the
+    # shopkeeper to re-speak with those details rather than filing a
+    # bill with blanks.
+    if not intent.transporter or intent.bhada is None:
+        missing = []
+        if not intent.transporter:
+            missing.append("transporter")
+        if intent.bhada is None:
+            missing.append("bhada")
+        missing_str = " aur ".join(missing)
+        await update.message.reply_text(
+            f"{missing_str.capitalize()} bhi boliye. Example: "
+            f"'...Sharma Transport se, bhada 500'. Self-pickup ke liye "
+            f"'self, bhada zero' bolna.\n\n"
+            f"{missing_str} भी बोलिए। जैसे: "
+            f"'...Sharma Transport से, bhada 500'। Self-pickup के लिए "
+            f"'self, bhada zero' बोलिए।"
+        )
+        return
+
     db = SessionLocal()
     try:
         items, rejected = _materialise_items(db, intent.bill_items)
 
-        # Reject the whole bill if any item couldn't be matched against
-        # the product catalog. We prefer "ask the shopkeeper to re-speak"
-        # over "file a bill with a guessed / unknown product". The
-        # rejection message echoes the spoken form so the shopkeeper
-        # can tell where the ASR mis-heard.
-        if rejected:
-            lines_en = [
-                "Kuch products catalog mein nahi mile. Bill nahi banaya.",
-                "",
-                "Samjha nahi:",
+        # Split rejections into unknown-products (recoverable via the
+        # password-gated catalog-add flow) and genuinely incomplete
+        # lines (not recoverable by adding a product). Unknown products
+        # get stashed in user_data; any other rejection reason aborts.
+        unknown_items = [
+            x for x, reason in rejected if reason == "unknown_product"
+        ]
+        other_rejected = [
+            (x, reason) for x, reason in rejected if reason != "unknown_product"
+        ]
+
+        if other_rejected:
+            lines = [
+                "Kuch items mein kami hai, bill nahi banaya.\n",
+                "कुछ items में कमी है, बिल नहीं बनाया।\n",
             ]
-            lines_hi = [
-                "कुछ products catalog में नहीं मिले। बिल नहीं बनाया।",
-                "",
-                "समझ नहीं आया:",
-            ]
-            for x, reason in rejected:
-                if reason == "unknown_product":
-                    desc = f"  • '{x.product_name}'"
-                    if x.quantity is not None:
-                        desc += f" (qty={x.quantity:g} {x.unit or ''}, rate={x.rate})"
-                    lines_en.append(desc)
-                    lines_hi.append(desc)
-                else:
-                    lines_en.append(f"  • line with missing {reason}: {x.product_name or '(no name)'}")
-                    lines_hi.append(f"  • line with missing {reason}: {x.product_name or '(no name)'}")
-            tail = (
-                "\nDobara clearly bolke bhejiye, sirf catalog ke products use kariye.\n\n"
-                "दोबारा clearly बोलकर भेजिए, सिर्फ catalog के products use कीजिए।"
+            for x, reason in other_rejected:
+                lines.append(f"  • line with missing {reason}: {x.product_name or '(no name)'}")
+            await update.message.reply_text("\n".join(lines))
+            return
+
+        if unknown_items:
+            # Stash the full classifier output + unknown product items
+            # so a subsequent "121" text can complete the flow.
+            context.user_data["pending_bill_add"] = {
+                "transcript": transcript,
+                "recipient_name": intent.recipient_name,
+                "transporter": intent.transporter,
+                "bhada": float(intent.bhada),
+                "all_items": [i.model_dump() for i in intent.bill_items],
+                "unknown_product_names": [
+                    (i.product_name, i.unit or "carton")
+                    for i in unknown_items
+                ],
+            }
+            names_desc = "\n".join(
+                f"  • {x.product_name} (qty={x.quantity:g} {x.unit or 'carton'}, rate={x.rate})"
+                for x in unknown_items
             )
             await update.message.reply_text(
-                "\n".join(lines_en) + "\n\n" + "\n".join(lines_hi) + tail,
+                f"Yeh products catalog mein nahi mile:\n{names_desc}\n\n"
+                f"Agar add karna chahte ho to password text kar ke bhejo "
+                f"({CATALOG_ADD_PASSWORD} bhejna hai). Password bhejte hi "
+                f"products add ho jaayenge aur bill ban jaayega.\n\n"
+                f"Nahi to dobara clearly bolke voice bhejiye.\n\n"
+                f"---\n"
+                f"ये products catalog में नहीं मिले:\n{names_desc}\n\n"
+                f"अगर add करना चाहते हैं तो password text करके भेजिए "
+                f"({CATALOG_ADD_PASSWORD} भेजना है)। Password भेजते ही "
+                f"products add हो जाएँगे और bill बन जाएगा।\n\n"
+                f"नहीं तो दोबारा clearly बोलकर voice भेजिए।"
             )
             return
 
@@ -213,7 +259,8 @@ async def handle_bill_intent(
         # revisit if they show up.
         gst_pct = items[0].gst_rate
         tax_amount = round(subtotal * gst_pct / 100, 2)
-        total = round(subtotal + tax_amount, 2)
+        bhada_amount = float(intent.bhada or 0.0)
+        total = round(subtotal + tax_amount + bhada_amount, 2)
 
         bill = Bill(
             user_id=user.id,
@@ -222,6 +269,8 @@ async def handle_bill_intent(
             bill_date=datetime.utcnow(),
             subtotal=round(subtotal, 2),
             tax_amount=tax_amount,
+            transporter=intent.transporter,
+            bhada=bhada_amount,
             total=total,
             raw_transcript=transcript[:2000] if transcript else None,
             status="created",
@@ -278,3 +327,100 @@ async def handle_bill_intent(
         )
     finally:
         db.close()
+
+
+# ---------------- Password-gated catalog-add flow ----------------
+
+def _canonical_product_name(spoken: str) -> str:
+    """Turn a free-form spoken product name into the canonical
+    'Date X' catalog form. If the spoken form already starts with
+    'date', capitalise each word; otherwise prefix 'Date '. Used by
+    the password-add flow, not by regular catalog lookups."""
+    normalized = " ".join(w for w in spoken.strip().split() if w)
+    if not normalized:
+        return ""
+    if normalized.lower().startswith("date "):
+        return normalized.title().replace("'S", "'s")
+    return ("Date " + normalized).title().replace("'S", "'s")
+
+
+async def maybe_complete_bill_add(
+    update, context, user,
+) -> bool:
+    """If there's a pending_bill_add stash and the user's text matches
+    the catalog-add password, add the unknown products to the catalog
+    and create the bill. Returns True if the message was handled
+    (caller should stop further processing), False otherwise.
+
+    Called from the text-message router before normal classification.
+    """
+    pending = context.user_data.get("pending_bill_add")
+    if not pending:
+        return False
+
+    text = (update.message.text or "").strip()
+
+    if text != CATALOG_ADD_PASSWORD:
+        # Any non-matching text cancels the pending add so stale state
+        # doesn't accumulate. We do NOT handle the message — the caller
+        # continues classifying normally so the user's command still
+        # gets processed.
+        context.user_data.pop("pending_bill_add", None)
+        logger.info("Pending catalog-add cleared (wrong password or new command).")
+        return False
+
+    # Password matched — add the unknown products, then create the bill.
+    db = SessionLocal()
+    try:
+        added_names: list[str] = []
+        for spoken_name, unit in pending["unknown_product_names"]:
+            canonical = _canonical_product_name(spoken_name)
+            if not canonical:
+                continue
+            # Avoid dupes if the canonical already exists (possibly
+            # because the shopkeeper spoke the same name twice).
+            existing = db.query(Product).filter(Product.name == canonical).first()
+            if existing:
+                if not existing.is_active:
+                    existing.is_active = 1
+                continue
+            db.add(Product(
+                name=canonical,
+                aliases=[spoken_name.lower(), canonical.lower()],
+                default_unit=unit or "carton",
+                gst_rate=18.0,
+                is_active=1,
+            ))
+            added_names.append(canonical)
+        db.commit()
+        logger.info(
+            "Catalog-add via password: %d new products (%s)",
+            len(added_names), added_names,
+        )
+
+        # Reconstruct the bill classification from the stashed state and
+        # re-enter the main bill path. Use a light shim so we can call
+        # handle_bill_intent with a fake intent object.
+        intent = IntentClassification(
+            intent="bill", scope="in_scope",
+            recipient_name=pending["recipient_name"],
+            transporter=pending["transporter"],
+            bhada=pending["bhada"],
+            bill_items=[BillItemExtracted(**d) for d in pending["all_items"]],
+            confidence=0.95,
+        )
+        context.user_data["last_transcript"] = pending.get("transcript") or ""
+        # Pop the pending state so a retry doesn't re-trigger.
+        context.user_data.pop("pending_bill_add", None)
+    finally:
+        db.close()
+
+    await update.message.reply_text(
+        f"Password confirm ho gaya. {len(added_names)} product(s) catalog "
+        f"mein add kar diye. Bill banaya ja raha hai...\n\n"
+        f"Password confirm हो गया। {len(added_names)} product(s) catalog "
+        f"में add कर दिए। बिल बनाया जा रहा है..."
+    )
+    # Re-enter the main handler with the reconstructed intent.
+    await handle_bill_intent(update, context, user, intent)
+    return True

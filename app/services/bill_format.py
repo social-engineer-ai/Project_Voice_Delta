@@ -142,8 +142,12 @@ def format_bill_message(bill: Bill) -> str:
             f"× ₹{item.rate:,.0f} = ₹{item.amount:,.2f}"
         )
     lines.append("")
+    if bill.transporter:
+        lines.append(f"Transporter: {bill.transporter}")
     lines.append(f"Subtotal:   ₹{bill.subtotal:,.2f}")
     lines.append(f"GST:        ₹{bill.tax_amount:,.2f}")
+    if bill.bhada and bill.bhada > 0:
+        lines.append(f"Bhada:      ₹{bill.bhada:,.2f}")
     lines.append(f"*Total:      ₹{bill.total:,.2f}*")
     return "\n".join(lines)
 
@@ -189,6 +193,10 @@ def render_bill_pdf(bill: Bill, output_path: Path) -> Path:
         small_style,
     ))
     elements.append(Paragraph(f"<b>Customer:</b> {bill.customer_name}", small_style))
+    if bill.transporter:
+        elements.append(Paragraph(
+            f"<b>Transporter:</b> {bill.transporter}", small_style,
+        ))
     elements.append(Spacer(1, 5 * mm))
 
     # Line items table.
@@ -225,8 +233,10 @@ def render_bill_pdf(bill: Bill, output_path: Path) -> Path:
         ["Subtotal", f"₹ {bill.subtotal:,.2f}"],
         [f"GST ({bill.items[0].gst_rate:g}%)" if bill.items else "GST",
          f"₹ {bill.tax_amount:,.2f}"],
-        ["Total", f"₹ {bill.total:,.2f}"],
     ]
+    if bill.bhada and bill.bhada > 0:
+        totals_data.append(["Bhada (Freight)", f"₹ {bill.bhada:,.2f}"])
+    totals_data.append(["Total", f"₹ {bill.total:,.2f}"])
     totals_table = Table(totals_data, hAlign="RIGHT", colWidths=[30 * mm, 30 * mm])
     totals_table.setStyle(TableStyle([
         ("FONTNAME", (0, 0), (-1, -1), unicode_font),

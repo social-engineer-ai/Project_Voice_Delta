@@ -30,6 +30,7 @@ DEFAULT_COMPANY = "ShopSaarthi Demo Co"
 SALES_LEDGER = "Sales"
 CGST_LEDGER = "Output CGST @ 9%"
 SGST_LEDGER = "Output SGST @ 9%"
+FREIGHT_LEDGER = "Freight Charges"
 
 
 def _sub(parent: Element, tag: str, text: str | None = None, **attrs: str) -> Element:
@@ -100,8 +101,15 @@ def build_sales_voucher_xml(
     _sub(voucher, "PARTYLEDGERNAME", bill.customer_name)
     _sub(voucher, "BASICBUYERNAME", bill.customer_name)
     _sub(voucher, "ISINVOICE", "Yes")
-    _sub(voucher, "NARRATION",
-         f"Voice-generated bill for {bill.customer_name}")
+    # Narration captures transporter + bhada so the voucher carries the
+    # context even when opened outside Tally. Tally preserves NARRATION
+    # on import and shows it in the voucher detail view.
+    narration_parts = [f"Voice-generated bill for {bill.customer_name}"]
+    if bill.transporter:
+        narration_parts.append(f"Transporter: {bill.transporter}")
+    if bill.bhada:
+        narration_parts.append(f"Bhada: Rs {bill.bhada:.2f}")
+    _sub(voucher, "NARRATION", " | ".join(narration_parts))
 
     # Inventory entries — one per line item.
     # Tally requires STOCKITEMNAME to exist in the Tally company. If it
@@ -124,14 +132,19 @@ def build_sales_voucher_xml(
         _sub(acc_list, "AMOUNT", f"-{item.amount:.2f}")
 
     # Ledger entries — party (debit grand total), sales (credit subtotal),
-    # tax ledgers (credit tax). The party-debit sum equals subtotal + tax,
-    # which equals grand total.
+    # tax ledgers (credit tax), freight (credit bhada if > 0). The
+    # party-debit sum equals subtotal + tax + bhada = grand total.
     _ledger_entry(voucher, bill.customer_name, bill.total, is_party=True)
     _ledger_entry(voucher, SALES_LEDGER, bill.subtotal, is_party=False)
     # Split tax into CGST + SGST 50/50 (common intra-state scenario).
     half_tax = bill.tax_amount / 2
     _ledger_entry(voucher, CGST_LEDGER, half_tax, is_party=False)
     _ledger_entry(voucher, SGST_LEDGER, half_tax, is_party=False)
+    # Freight: only emit if bhada > 0. Self-pickup (bhada=0) skips this
+    # ledger so the voucher doesn't reference a ledger that may not exist
+    # in the shop's chart of accounts for cash / self-pickup sales.
+    if bill.bhada and bill.bhada > 0:
+        _ledger_entry(voucher, FREIGHT_LEDGER, bill.bhada, is_party=False)
 
     # Pretty-print.
     rough = tostring(envelope, encoding="utf-8")

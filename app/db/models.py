@@ -134,6 +134,11 @@ class Bill(Base):
     bill_date = Column(DateTime, default=datetime.utcnow, index=True)
     subtotal = Column(Float, nullable=False, default=0.0)
     tax_amount = Column(Float, nullable=False, default=0.0)
+    # Transport fields — added 2026-04-23. Captured from the voice command
+    # alongside products. The Tally XML adds a Freight ledger credit for
+    # `bhada` so the grand total on the voucher reconciles.
+    transporter = Column(String(255), nullable=True)
+    bhada = Column(Float, nullable=False, default=0.0)
     total = Column(Float, nullable=False, default=0.0)
     raw_transcript = Column(Text, nullable=True)
     status = Column(String(16), default="created")
