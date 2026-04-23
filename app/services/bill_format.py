@@ -144,21 +144,15 @@ def format_bill_message(bill: Bill) -> str:
     lines.append("")
     if bill.transporter:
         lines.append(f"Transporter: {bill.transporter}")
-    if bill.dalal and bill.dalal.lower() != "none":
-        lines.append(f"Dalal: {bill.dalal} ({bill.dalali_percent:g}%)")
     lines.append(f"Subtotal:   ₹{bill.subtotal:,.2f}")
     lines.append(f"GST:        ₹{bill.tax_amount:,.2f}")
     if bill.bhada and bill.bhada > 0:
         lines.append(f"Bhada:      ₹{bill.bhada:,.2f}")
     lines.append(f"*Total:      ₹{bill.total:,.2f}*")
-    # Dalali is informational, not added to customer total — show below
-    # the total with a note so the shopkeeper knows it's their payable
-    # to the dalal, not the customer's receivable.
-    if bill.dalali_amount and bill.dalali_amount > 0:
-        lines.append(
-            f"_Dalali payable: ₹{bill.dalali_amount:,.2f} "
-            f"({bill.dalali_percent:g}% of subtotal, not in customer total)_"
-        )
+    # Dalal/dalali intentionally not shown on the customer bill — broker
+    # context goes into a separate dalal memo (see format_dalal_memo_message
+    # / render_dalal_memo_pdf) that the shopkeeper keeps for broker
+    # reconciliation and does not share with the customer.
     return "\n".join(lines)
 
 
@@ -207,11 +201,8 @@ def render_bill_pdf(bill: Bill, output_path: Path) -> Path:
         elements.append(Paragraph(
             f"<b>Transporter:</b> {bill.transporter}", small_style,
         ))
-    if bill.dalal and bill.dalal.lower() != "none":
-        elements.append(Paragraph(
-            f"<b>Dalal:</b> {bill.dalal} ({bill.dalali_percent:g}%)",
-            small_style,
-        ))
+    # Dalal is intentionally absent from the customer PDF — it lives on
+    # the separate dalal memo only.
     elements.append(Spacer(1, 5 * mm))
 
     # Line items table.
@@ -252,39 +243,175 @@ def render_bill_pdf(bill: Bill, output_path: Path) -> Path:
     if bill.bhada and bill.bhada > 0:
         totals_data.append(["Bhada (Freight)", f"₹ {bill.bhada:,.2f}"])
     totals_data.append(["Total", f"₹ {bill.total:,.2f}"])
-    # Remember the Total row's index before optionally appending the
-    # dalali line, so the bold + line-above styling lands on the right
-    # row even when dalali is present.
-    total_row_idx = len(totals_data) - 1
-    if bill.dalali_amount and bill.dalali_amount > 0:
-        totals_data.append([
-            f"Dalali ({bill.dalali_percent:g}%, not in total)",
-            f"₹ {bill.dalali_amount:,.2f}",
-        ])
-    totals_table = Table(totals_data, hAlign="RIGHT", colWidths=[40 * mm, 30 * mm])
-    style = [
+    totals_table = Table(totals_data, hAlign="RIGHT", colWidths=[30 * mm, 30 * mm])
+    totals_table.setStyle(TableStyle([
         ("FONTNAME", (0, 0), (-1, -1), unicode_font),
+        ("FONTNAME", (0, -1), (-1, -1), unicode_font_bold),
         ("FONTSIZE", (0, 0), (-1, -1), 9),
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-        # Total row gets bold + a line above it.
-        ("FONTNAME", (0, total_row_idx), (-1, total_row_idx), unicode_font_bold),
-        ("LINEABOVE", (0, total_row_idx), (-1, total_row_idx), 0.5, colors.black),
-        ("TOPPADDING", (0, total_row_idx), (-1, total_row_idx), 3),
-    ]
-    # Style the dalali row (if any) in muted grey italic so visually it
-    # reads as informational, not part of the customer's bill.
-    if bill.dalali_amount and bill.dalali_amount > 0:
-        style.extend([
-            ("FONTSIZE", (0, -1), (-1, -1), 8),
-            ("TEXTCOLOR", (0, -1), (-1, -1), colors.grey),
-            ("TOPPADDING", (0, -1), (-1, -1), 2),
-        ])
-    totals_table.setStyle(TableStyle(style))
+        ("LINEABOVE", (0, -1), (-1, -1), 0.5, colors.black),
+        ("TOPPADDING", (0, -1), (-1, -1), 3),
+    ]))
     elements.append(totals_table)
 
     elements.append(Spacer(1, 8 * mm))
     elements.append(Paragraph(
         "This is a system-generated bill. Thank you for your business.",
+        small_style,
+    ))
+
+    doc.build(elements)
+    return output_path
+
+
+# ---------------- Dalal memo (separate from customer bill) ----------------
+#
+# The dalal memo is a shop-internal document the shopkeeper keeps (or shares
+# with the broker) to record commission payable for a bill. It is NOT shared
+# with the customer. Includes the line items, transporter + bhada, and the
+# dalali amount — everything the broker needs to reconcile their commission.
+
+
+def has_dalal(bill: Bill) -> bool:
+    """Return True if the bill has a real broker (dalal != 'None' + dalali > 0)."""
+    return bool(
+        bill.dalal
+        and bill.dalal.lower() != "none"
+        and bill.dalali_amount
+        and bill.dalali_amount > 0
+    )
+
+
+def format_dalal_memo_message(bill: Bill) -> str:
+    """Render the dalal memo as a plain-text Telegram message. Short and
+    focused on commission reconciliation, not on GST or tax breakdown."""
+    lines: list[str] = []
+    lines.append(f"📋 *Dalal Memo — {bill.bill_number}*")
+    lines.append(f"Date: {bill.bill_date.strftime('%d %b %Y, %I:%M %p')}")
+    lines.append(f"Dalal: *{bill.dalal}*")
+    lines.append(f"Customer: {bill.customer_name}")
+    lines.append("")
+    lines.append("Items:")
+    for i, item in enumerate(bill.items, 1):
+        unit = item.unit or ""
+        lines.append(
+            f"  {i}. {item.product_name} — {item.quantity:g} {unit} "
+            f"× ₹{item.rate:,.0f} = ₹{item.amount:,.2f}"
+        )
+    lines.append("")
+    lines.append(f"Subtotal:  ₹{bill.subtotal:,.2f}")
+    if bill.transporter:
+        lines.append(f"Transporter: {bill.transporter}")
+    if bill.bhada and bill.bhada > 0:
+        lines.append(f"Bhada:     ₹{bill.bhada:,.2f}")
+    lines.append("")
+    lines.append(f"*Dalali ({bill.dalali_percent:g}%): ₹{bill.dalali_amount:,.2f}*")
+    lines.append("")
+    lines.append(f"_Customer bill total (for reference): ₹{bill.total:,.2f}_")
+    return "\n".join(lines)
+
+
+def render_dalal_memo_pdf(bill: Bill, output_path: Path) -> Path:
+    """Render a one-page A5 PDF of the dalal memo. Similar to the customer
+    bill but titled 'Dalal Memo', no shop GSTIN / tax breakdown, and the
+    dalali amount presented prominently."""
+    doc = SimpleDocTemplate(
+        str(output_path),
+        pagesize=A5,
+        topMargin=10 * mm, bottomMargin=10 * mm,
+        leftMargin=10 * mm, rightMargin=10 * mm,
+    )
+
+    unicode_font = _font_name()
+    unicode_font_bold = _font_name(bold=True)
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "title", parent=styles["Heading1"],
+        fontName=unicode_font_bold, fontSize=14, alignment=1,
+    )
+    small_style = ParagraphStyle(
+        "small", parent=styles["Normal"],
+        fontName=unicode_font, fontSize=8, leading=10,
+    )
+
+    elements: list = []
+    elements.append(Paragraph("Dalal Memo", title_style))
+    elements.append(Paragraph(
+        f"{SHOP_NAME} &mdash; Broker Commission Note",
+        small_style,
+    ))
+    elements.append(Spacer(1, 5 * mm))
+
+    elements.append(Paragraph(f"<b>Ref Bill:</b> {bill.bill_number}", small_style))
+    elements.append(Paragraph(
+        f"<b>Date:</b> {bill.bill_date.strftime('%d %b %Y, %I:%M %p')}",
+        small_style,
+    ))
+    elements.append(Paragraph(f"<b>Dalal:</b> {bill.dalal}", small_style))
+    elements.append(Paragraph(f"<b>Customer:</b> {bill.customer_name}", small_style))
+    if bill.transporter:
+        elements.append(Paragraph(
+            f"<b>Transporter:</b> {bill.transporter}", small_style,
+        ))
+    elements.append(Spacer(1, 5 * mm))
+
+    # Line items — same shape as the customer bill so the dalal can tie
+    # the memo to the bill their customer received.
+    data = [["#", "Product", "Qty", "Unit", "Rate (₹)", "Amount (₹)"]]
+    for i, item in enumerate(bill.items, 1):
+        data.append([
+            str(i),
+            item.product_name,
+            f"{item.quantity:g}",
+            item.unit or "",
+            f"{item.rate:,.0f}",
+            f"{item.amount:,.2f}",
+        ])
+    table = Table(data, hAlign="LEFT",
+                  colWidths=[8 * mm, 50 * mm, 14 * mm, 14 * mm, 22 * mm, 26 * mm])
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.black),
+        ("FONTNAME", (0, 0), (-1, -1), unicode_font),
+        ("FONTNAME", (0, 0), (-1, 0), unicode_font_bold),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("ALIGN", (2, 1), (-1, -1), "RIGHT"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    elements.append(table)
+    elements.append(Spacer(1, 5 * mm))
+
+    # Totals — subtotal, bhada, and the prominent dalali line.
+    totals_data = [["Subtotal", f"₹ {bill.subtotal:,.2f}"]]
+    if bill.bhada and bill.bhada > 0:
+        totals_data.append(["Bhada (Freight)", f"₹ {bill.bhada:,.2f}"])
+    totals_data.append([
+        f"Dalali ({bill.dalali_percent:g}%)",
+        f"₹ {bill.dalali_amount:,.2f}",
+    ])
+    totals_table = Table(totals_data, hAlign="RIGHT", colWidths=[40 * mm, 30 * mm])
+    totals_table.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -1), unicode_font),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        # Highlight the dalali (last) row: bold + line above.
+        ("FONTNAME", (0, -1), (-1, -1), unicode_font_bold),
+        ("LINEABOVE", (0, -1), (-1, -1), 0.5, colors.black),
+        ("TOPPADDING", (0, -1), (-1, -1), 3),
+    ]))
+    elements.append(totals_table)
+
+    elements.append(Spacer(1, 5 * mm))
+    elements.append(Paragraph(
+        f"<i>Customer bill total (for reference): ₹ {bill.total:,.2f}</i>",
+        small_style,
+    ))
+
+    elements.append(Spacer(1, 8 * mm))
+    elements.append(Paragraph(
+        "This memo is for broker commission reconciliation. "
+        "Not a customer invoice.",
         small_style,
     ))
 

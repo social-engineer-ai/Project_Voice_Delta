@@ -19,7 +19,13 @@ from telegram.ext import ContextTypes
 
 from app.db.models import Bill, BillItem, Product, User
 from app.db.session import SessionLocal
-from app.services.bill_format import format_bill_message, render_bill_pdf
+from app.services.bill_format import (
+    format_bill_message,
+    format_dalal_memo_message,
+    has_dalal,
+    render_bill_pdf,
+    render_dalal_memo_pdf,
+)
 from app.services.classify import IntentClassification, BillItemExtracted
 from app.services.tally_export import write_sales_voucher_xml
 
@@ -305,7 +311,7 @@ async def handle_bill_intent(
         msg = format_bill_message(bill)
         await update.message.reply_text(msg, parse_mode="Markdown")
 
-        # 2. PDF + Tally XML attachments.
+        # 2. Customer bill PDF + Tally XML attachments.
         tmpdir = Path(tempfile.mkdtemp(prefix="bill_"))
         pdf_path = tmpdir / f"{bill.bill_number}.pdf"
         xml_path = tmpdir / f"{bill.bill_number}.xml"
@@ -317,7 +323,7 @@ async def handle_bill_intent(
                 await update.message.reply_document(
                     document=f,
                     filename=pdf_path.name,
-                    caption="Bill PDF",
+                    caption="Customer bill PDF (shareable with customer)",
                 )
             with open(xml_path, "rb") as f:
                 await update.message.reply_document(
@@ -325,6 +331,24 @@ async def handle_bill_intent(
                     filename=xml_path.name,
                     caption="Tally import file (Sales Voucher XML)",
                 )
+
+            # 3. Dalal memo — only when a real broker + commission is set.
+            # Never part of the customer bill; shopkeeper-only document
+            # for broker reconciliation.
+            if has_dalal(bill):
+                dalal_pdf_path = tmpdir / f"{bill.bill_number}-dalal.pdf"
+                render_dalal_memo_pdf(bill, dalal_pdf_path)
+
+                await update.message.reply_text(
+                    format_dalal_memo_message(bill),
+                    parse_mode="Markdown",
+                )
+                with open(dalal_pdf_path, "rb") as f:
+                    await update.message.reply_document(
+                        document=f,
+                        filename=dalal_pdf_path.name,
+                        caption="Dalal memo (shopkeeper-only — do NOT share with customer)",
+                    )
         finally:
             # Leave the tmpdir for now — helpful for post-demo inspection.
             # A cron or shutdown hook can clean these up in production.

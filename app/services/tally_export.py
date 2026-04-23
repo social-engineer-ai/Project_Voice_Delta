@@ -104,16 +104,15 @@ def build_sales_voucher_xml(
     # Narration captures transporter + bhada so the voucher carries the
     # context even when opened outside Tally. Tally preserves NARRATION
     # on import and shows it in the voucher detail view.
+    # Narration is on the shop's customer-ledger sales voucher; kept
+    # dalal-free to mirror the customer-bill convention. Dalal context
+    # lives on a separate dalal memo document (bill_format.render_dalal_memo_pdf)
+    # that the shopkeeper keeps outside Tally.
     narration_parts = [f"Voice-generated bill for {bill.customer_name}"]
     if bill.transporter:
         narration_parts.append(f"Transporter: {bill.transporter}")
     if bill.bhada:
         narration_parts.append(f"Bhada: Rs {bill.bhada:.2f}")
-    if bill.dalal and bill.dalal.lower() != "none":
-        narration_parts.append(
-            f"Dalal: {bill.dalal} ({bill.dalali_percent:g}% = "
-            f"Rs {bill.dalali_amount:.2f}, informational — not in total)"
-        )
     _sub(voucher, "NARRATION", " | ".join(narration_parts))
 
     # Inventory entries — one per line item.
