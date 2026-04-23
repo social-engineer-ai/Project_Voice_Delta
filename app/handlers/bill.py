@@ -78,33 +78,48 @@ def _fuzzy_match_product(db, spoken_name: str) -> Product | None:
 
 
 def _materialise_items(
-    db, extracted_items: list[BillItemExtracted]
-) -> list[BillItem]:
+    db, extracted_items: list[BillItemExtracted],
+) -> tuple[list[BillItem], list[tuple[BillItemExtracted, str]]]:
     """Convert the classifier's extracted items into BillItem rows
-    (not yet committed). Fuzzy-matches product names where possible;
-    unmatched products still get a row with product_id=None.
+    (not yet committed). Returns (accepted_rows, rejected_with_reason).
+
+    A line is rejected if:
+      - the product_name / quantity / rate is missing, OR
+      - the spoken product name does not fuzzy-match any active product
+        in the catalog above PRODUCT_MATCH_THRESHOLD.
+
+    The caller should refuse to create the bill if any item is rejected
+    rather than silently filing unknown products. The shopkeeper then
+    re-speaks so the bill carries only catalog-known products.
     """
     rows: list[BillItem] = []
+    rejected: list[tuple[BillItemExtracted, str]] = []
     for x in extracted_items:
         if not x.product_name or x.quantity is None or x.rate is None:
-            logger.warning("Skipping incomplete item: %s", x)
+            logger.warning("Rejecting incomplete item: %s", x)
+            rejected.append((x, "incomplete"))
             continue
         product = _fuzzy_match_product(db, x.product_name)
-        product_id = product.id if product else None
-        unit = x.unit or (product.default_unit if product else "")
-        gst_rate = product.gst_rate if product else 18.0
+        if product is None:
+            logger.warning(
+                "Rejecting unknown product %r (not in catalog within "
+                "fuzzy threshold %d)",
+                x.product_name, PRODUCT_MATCH_THRESHOLD,
+            )
+            rejected.append((x, "unknown_product"))
+            continue
+        unit = x.unit or product.default_unit or ""
         amount = round(x.quantity * x.rate, 2)
         rows.append(BillItem(
-            product_id=product_id,
-            # Prefer canonical Product.name if matched; else keep spoken form.
-            product_name=product.name if product else x.product_name,
+            product_id=product.id,
+            product_name=product.name,
             quantity=float(x.quantity),
             unit=unit,
             rate=float(x.rate),
             amount=amount,
-            gst_rate=float(gst_rate),
+            gst_rate=float(product.gst_rate),
         ))
-    return rows
+    return rows, rejected
 
 
 async def handle_bill_intent(
@@ -146,7 +161,43 @@ async def handle_bill_intent(
 
     db = SessionLocal()
     try:
-        items = _materialise_items(db, intent.bill_items)
+        items, rejected = _materialise_items(db, intent.bill_items)
+
+        # Reject the whole bill if any item couldn't be matched against
+        # the product catalog. We prefer "ask the shopkeeper to re-speak"
+        # over "file a bill with a guessed / unknown product". The
+        # rejection message echoes the spoken form so the shopkeeper
+        # can tell where the ASR mis-heard.
+        if rejected:
+            lines_en = [
+                "Kuch products catalog mein nahi mile. Bill nahi banaya.",
+                "",
+                "Samjha nahi:",
+            ]
+            lines_hi = [
+                "कुछ products catalog में नहीं मिले। बिल नहीं बनाया।",
+                "",
+                "समझ नहीं आया:",
+            ]
+            for x, reason in rejected:
+                if reason == "unknown_product":
+                    desc = f"  • '{x.product_name}'"
+                    if x.quantity is not None:
+                        desc += f" (qty={x.quantity:g} {x.unit or ''}, rate={x.rate})"
+                    lines_en.append(desc)
+                    lines_hi.append(desc)
+                else:
+                    lines_en.append(f"  • line with missing {reason}: {x.product_name or '(no name)'}")
+                    lines_hi.append(f"  • line with missing {reason}: {x.product_name or '(no name)'}")
+            tail = (
+                "\nDobara clearly bolke bhejiye, sirf catalog ke products use kariye.\n\n"
+                "दोबारा clearly बोलकर भेजिए, सिर्फ catalog के products use कीजिए।"
+            )
+            await update.message.reply_text(
+                "\n".join(lines_en) + "\n\n" + "\n".join(lines_hi) + tail,
+            )
+            return
+
         if not items:
             await update.message.reply_text(
                 "Items mein kuch kami hai (product, quantity, ya rate "

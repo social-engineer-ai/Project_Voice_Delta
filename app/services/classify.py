@@ -352,11 +352,20 @@ The shopkeeper will speak one of twelve kinds of commands, split into two groups
      "रामू भैया"      -> "Ramu bhaiya"
      "डेट अजवा"       -> "Date Ajwa"
      "क्राउन फर्द"    -> "Crown Fard"
+     "टेट को"         -> "Tet Ko"  (transliterate everything, don't drop words)
      "50 बोरी"        -> unit="bori", quantity=50
    Standard Hinglish transliteration is fine; do not translate, just
    write the Hindi-pronounced name using Latin letters. This rule
    applies ONLY to bill intent; other intents keep the existing
    "return names exactly as spoken" rule.
+
+   CRITICAL: If you do not recognize the product variety, return the
+   transliterated spoken form INCLUDING ALL WORDS exactly as the
+   speaker said them. Do not default to "Date" or any partial value.
+   The downstream fuzzy-matcher can resolve unfamiliar variants if you
+   give it the full spoken form; it cannot recover if you drop words.
+   Example: for "5 kg टेट को का rate 2200", return
+   product_name="Tet Ko", not "Date" and not "Tet".
 
    Extract the customer name into recipient_name, and each line item
    into bill_items[] with product_name, quantity, unit, rate. Maximum

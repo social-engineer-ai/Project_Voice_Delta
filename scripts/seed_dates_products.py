@@ -82,6 +82,12 @@ CATALOG: list[dict] = [
         "name": "Date Buman",
         "aliases": [
             "date buman", "buman", "booman", "boman", "date booman",
+            # ASR drift: saaras:v3 transcribes "Buman" as "women" on
+            # some takes (acoustic confusion bu->wo, man->men). Include
+            # the misheard form and several phonetic neighbours so the
+            # fuzzy-match resolves cleanly instead of sending the line
+            # to an unmatched-product rejection.
+            "women", "date women", "vomen", "bomen", "booman dates",
         ],
         "default_unit": "carton",
         "gst_rate": 18.0,
@@ -108,6 +114,12 @@ CATALOG: list[dict] = [
         "name": "Date Tetco",
         "aliases": [
             "date tetco", "tetco", "tetco dates", "tetko", "date tetko",
+            # ASR drift: saaras:v3 returns "टेट को" (two words) on some
+            # takes, which the classifier then transliterates as
+            # "Tet ko" / "Tet Ko". Covering both the joined and spaced
+            # forms so the fuzzy-match threshold (0.70) is comfortably
+            # exceeded.
+            "tet ko", "tet-ko", "tetko dates", "tatko", "tat ko",
         ],
         "default_unit": "carton",
         "gst_rate": 18.0,
