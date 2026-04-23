@@ -166,23 +166,29 @@ async def handle_bill_intent(
         )
         return
 
-    # Transporter and bhada are required to create a bill. Ask the
-    # shopkeeper to re-speak with those details rather than filing a
-    # bill with blanks.
-    if not intent.transporter or intent.bhada is None:
-        missing = []
-        if not intent.transporter:
-            missing.append("transporter")
-        if intent.bhada is None:
-            missing.append("bhada")
-        missing_str = " aur ".join(missing)
+    # Transporter, bhada, dalal, and dalali_percent are all required to
+    # create a bill. Ask the shopkeeper to re-speak with those details
+    # rather than filing a bill with blanks.
+    missing: list[str] = []
+    if not intent.transporter:
+        missing.append("transporter")
+    if intent.bhada is None:
+        missing.append("bhada")
+    if not intent.dalal:
+        missing.append("dalal")
+    if intent.dalali_percent is None:
+        missing.append("dalali percent")
+    if missing:
+        missing_str = ", ".join(missing)
         await update.message.reply_text(
             f"{missing_str.capitalize()} bhi boliye. Example: "
-            f"'...Sharma Transport se, bhada 500'. Self-pickup ke liye "
-            f"'self, bhada zero' bolna.\n\n"
+            f"'...Sharma Transport se bhada 500, Praveen dalal ka 1.5 "
+            f"percent'. Self-pickup ke liye 'self, bhada zero'. Koi "
+            f"dalal nahi hai to 'no dalal, dalali zero' bolna.\n\n"
             f"{missing_str} भी बोलिए। जैसे: "
-            f"'...Sharma Transport से, bhada 500'। Self-pickup के लिए "
-            f"'self, bhada zero' बोलिए।"
+            f"'...Sharma Transport से bhada 500, Praveen दलाल का 1.5 "
+            f"percent'। Self-pickup के लिए 'self, bhada zero'। कोई "
+            f"दलाल नहीं है तो 'no dalal, dalali zero' बोलिए।"
         )
         return
 
@@ -219,6 +225,8 @@ async def handle_bill_intent(
                 "recipient_name": intent.recipient_name,
                 "transporter": intent.transporter,
                 "bhada": float(intent.bhada),
+                "dalal": intent.dalal,
+                "dalali_percent": float(intent.dalali_percent),
                 "all_items": [i.model_dump() for i in intent.bill_items],
                 "unknown_product_names": [
                     (i.product_name, i.unit or "carton")
@@ -260,6 +268,11 @@ async def handle_bill_intent(
         gst_pct = items[0].gst_rate
         tax_amount = round(subtotal * gst_pct / 100, 2)
         bhada_amount = float(intent.bhada or 0.0)
+        # Dalali: informational only — computed from subtotal but NOT
+        # added to the customer's grand total. It sits on the bill so
+        # the shopkeeper knows their payable to the dalal.
+        dalali_pct = float(intent.dalali_percent or 0.0)
+        dalali_amount = round(subtotal * dalali_pct / 100, 2)
         total = round(subtotal + tax_amount + bhada_amount, 2)
 
         bill = Bill(
@@ -271,6 +284,9 @@ async def handle_bill_intent(
             tax_amount=tax_amount,
             transporter=intent.transporter,
             bhada=bhada_amount,
+            dalal=intent.dalal,
+            dalali_percent=dalali_pct,
+            dalali_amount=dalali_amount,
             total=total,
             raw_transcript=transcript[:2000] if transcript else None,
             status="created",
@@ -406,6 +422,8 @@ async def maybe_complete_bill_add(
             recipient_name=pending["recipient_name"],
             transporter=pending["transporter"],
             bhada=pending["bhada"],
+            dalal=pending.get("dalal"),
+            dalali_percent=pending.get("dalali_percent"),
             bill_items=[BillItemExtracted(**d) for d in pending["all_items"]],
             confidence=0.95,
         )

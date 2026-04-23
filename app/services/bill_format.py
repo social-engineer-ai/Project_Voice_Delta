@@ -144,11 +144,21 @@ def format_bill_message(bill: Bill) -> str:
     lines.append("")
     if bill.transporter:
         lines.append(f"Transporter: {bill.transporter}")
+    if bill.dalal and bill.dalal.lower() != "none":
+        lines.append(f"Dalal: {bill.dalal} ({bill.dalali_percent:g}%)")
     lines.append(f"Subtotal:   ₹{bill.subtotal:,.2f}")
     lines.append(f"GST:        ₹{bill.tax_amount:,.2f}")
     if bill.bhada and bill.bhada > 0:
         lines.append(f"Bhada:      ₹{bill.bhada:,.2f}")
     lines.append(f"*Total:      ₹{bill.total:,.2f}*")
+    # Dalali is informational, not added to customer total — show below
+    # the total with a note so the shopkeeper knows it's their payable
+    # to the dalal, not the customer's receivable.
+    if bill.dalali_amount and bill.dalali_amount > 0:
+        lines.append(
+            f"_Dalali payable: ₹{bill.dalali_amount:,.2f} "
+            f"({bill.dalali_percent:g}% of subtotal, not in customer total)_"
+        )
     return "\n".join(lines)
 
 
@@ -197,6 +207,11 @@ def render_bill_pdf(bill: Bill, output_path: Path) -> Path:
         elements.append(Paragraph(
             f"<b>Transporter:</b> {bill.transporter}", small_style,
         ))
+    if bill.dalal and bill.dalal.lower() != "none":
+        elements.append(Paragraph(
+            f"<b>Dalal:</b> {bill.dalal} ({bill.dalali_percent:g}%)",
+            small_style,
+        ))
     elements.append(Spacer(1, 5 * mm))
 
     # Line items table.
@@ -237,15 +252,34 @@ def render_bill_pdf(bill: Bill, output_path: Path) -> Path:
     if bill.bhada and bill.bhada > 0:
         totals_data.append(["Bhada (Freight)", f"₹ {bill.bhada:,.2f}"])
     totals_data.append(["Total", f"₹ {bill.total:,.2f}"])
-    totals_table = Table(totals_data, hAlign="RIGHT", colWidths=[30 * mm, 30 * mm])
-    totals_table.setStyle(TableStyle([
+    # Remember the Total row's index before optionally appending the
+    # dalali line, so the bold + line-above styling lands on the right
+    # row even when dalali is present.
+    total_row_idx = len(totals_data) - 1
+    if bill.dalali_amount and bill.dalali_amount > 0:
+        totals_data.append([
+            f"Dalali ({bill.dalali_percent:g}%, not in total)",
+            f"₹ {bill.dalali_amount:,.2f}",
+        ])
+    totals_table = Table(totals_data, hAlign="RIGHT", colWidths=[40 * mm, 30 * mm])
+    style = [
         ("FONTNAME", (0, 0), (-1, -1), unicode_font),
-        ("FONTNAME", (0, -1), (-1, -1), unicode_font_bold),
         ("FONTSIZE", (0, 0), (-1, -1), 9),
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-        ("LINEABOVE", (0, -1), (-1, -1), 0.5, colors.black),
-        ("TOPPADDING", (0, -1), (-1, -1), 3),
-    ]))
+        # Total row gets bold + a line above it.
+        ("FONTNAME", (0, total_row_idx), (-1, total_row_idx), unicode_font_bold),
+        ("LINEABOVE", (0, total_row_idx), (-1, total_row_idx), 0.5, colors.black),
+        ("TOPPADDING", (0, total_row_idx), (-1, total_row_idx), 3),
+    ]
+    # Style the dalali row (if any) in muted grey italic so visually it
+    # reads as informational, not part of the customer's bill.
+    if bill.dalali_amount and bill.dalali_amount > 0:
+        style.extend([
+            ("FONTSIZE", (0, -1), (-1, -1), 8),
+            ("TEXTCOLOR", (0, -1), (-1, -1), colors.grey),
+            ("TOPPADDING", (0, -1), (-1, -1), 2),
+        ])
+    totals_table.setStyle(TableStyle(style))
     elements.append(totals_table)
 
     elements.append(Spacer(1, 8 * mm))

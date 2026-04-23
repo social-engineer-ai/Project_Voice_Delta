@@ -139,6 +139,14 @@ class Bill(Base):
     # `bhada` so the grand total on the voucher reconciles.
     transporter = Column(String(255), nullable=True)
     bhada = Column(Float, nullable=False, default=0.0)
+    # Broker fields — added 2026-04-23. Convention: dalali is tracked on
+    # the bill for shopkeeper reference and Tally narration, but is NOT
+    # added to the customer's grand total (dalali is a shop-to-dalal
+    # payable, not a customer receivable). `dalali_amount` is the
+    # computed absolute amount = subtotal * dalali_percent / 100.
+    dalal = Column(String(255), nullable=True)
+    dalali_percent = Column(Float, nullable=False, default=0.0)
+    dalali_amount = Column(Float, nullable=False, default=0.0)
     total = Column(Float, nullable=False, default=0.0)
     raw_transcript = Column(Text, nullable=True)
     status = Column(String(16), default="created")

@@ -109,6 +109,11 @@ def build_sales_voucher_xml(
         narration_parts.append(f"Transporter: {bill.transporter}")
     if bill.bhada:
         narration_parts.append(f"Bhada: Rs {bill.bhada:.2f}")
+    if bill.dalal and bill.dalal.lower() != "none":
+        narration_parts.append(
+            f"Dalal: {bill.dalal} ({bill.dalali_percent:g}% = "
+            f"Rs {bill.dalali_amount:.2f}, informational — not in total)"
+        )
     _sub(voucher, "NARRATION", " | ".join(narration_parts))
 
     # Inventory entries — one per line item.
