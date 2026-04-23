@@ -35,10 +35,12 @@ IntentValue = Literal[
 
 Scope = Literal["in_scope", "future_phase", "unknown"]
 
-IN_SCOPE_INTENTS: frozenset[str] = frozenset({"message", "reminder", "delegate", "call", "bill"})
+IN_SCOPE_INTENTS: frozenset[str] = frozenset({
+    "message", "reminder", "delegate", "call", "bill", "summary",
+})
 FUTURE_PHASE_INTENTS: frozenset[str] = frozenset({
     "order", "collection", "supplier_payment",
-    "inventory", "price_check", "worker", "summary",
+    "inventory", "price_check", "worker",
 })
 
 
@@ -91,7 +93,9 @@ _GEMINI_DISALLOWED_KEYS = frozenset(
 # recipient_name even with very explicit prompt instructions.
 _FORCE_REQUIRED_TOP_LEVEL: frozenset[str] = frozenset({
     "intent", "scope", "recipient_name", "bill_items",
-    "transporter", "bhada", "dalal", "dalali_percent", "confidence",
+    "transporter", "bhada", "dalal", "dalali_percent",
+    "report_subject", "report_filter", "report_period",
+    "confidence",
 })
 
 # Fields inside bill_items[] that must also be present. Otherwise Gemini
@@ -282,6 +286,47 @@ class IntentClassification(BaseModel):
             "For 'bill' intent only: the dalal's commission as a percentage "
             "(e.g., 1.5 for '1.5 percent dalali'). Zero if the speaker says "
             "there is no dalali or zero percent. Null for every other intent."
+        ),
+    )
+
+    # Report fields — populated only when intent='summary'. All null for
+    # every other intent.
+    report_subject: Optional[str] = Field(
+        default=None,
+        description=(
+            "For 'summary' intent only: one of 'dalal', 'transporter', "
+            "'customer', 'overall'. Null for every other intent."
+        ),
+    )
+    report_filter: Optional[str] = Field(
+        default=None,
+        description=(
+            "For 'summary' intent only: the name of the dalal / transporter "
+            "/ customer to filter by (transliterated to Latin). Null when "
+            "subject is 'overall' or when not specified."
+        ),
+    )
+    report_period: Optional[str] = Field(
+        default=None,
+        description=(
+            "For 'summary' intent only: one of 'today', 'yesterday', "
+            "'this_week', 'last_7_days', 'this_month', 'last_30_days', "
+            "'custom'. Default to 'today' if the speaker didn't say a "
+            "period. Null for every other intent."
+        ),
+    )
+    report_from: Optional[str] = Field(
+        default=None,
+        description=(
+            "For 'summary' intent only, when report_period='custom': "
+            "start date in ISO format YYYY-MM-DD. Null otherwise."
+        ),
+    )
+    report_to: Optional[str] = Field(
+        default=None,
+        description=(
+            "For 'summary' intent only, when report_period='custom': "
+            "end date in ISO format YYYY-MM-DD (inclusive). Null otherwise."
         ),
     )
     confidence: float = Field(
@@ -481,6 +526,77 @@ The shopkeeper will speak one of twelve kinds of commands, split into two groups
      "confidence": 0.9
    }
 
+6. SUMMARY: A business-report query. Triggered by asking for totals,
+   summaries, or statistics about bills. Extracts a subject (dalal,
+   transporter, customer, or overall), optional filter name, and a
+   time period. Always set scope=in_scope for summary.
+
+   report_subject must be one of: "dalal", "transporter", "customer",
+   "overall". When in doubt, pick "overall".
+   report_filter is the person / firm to filter by (transliterated
+   Latin, exact spoken form; downstream fuzzy-matches against the
+   catalog). Null when subject is "overall" or when no specific
+   filter was spoken.
+   report_period must be one of: "today", "yesterday", "this_week",
+   "last_7_days", "this_month", "last_30_days", "custom". Default
+   "today" if the speaker doesn't specify.
+   When report_period="custom", fill report_from / report_to with
+   ISO dates (YYYY-MM-DD).
+
+   Examples:
+
+   Input: "Praveen ka aaj ka total dikhao"
+   Output JSON:
+   {
+     "intent": "summary", "scope": "in_scope",
+     "report_subject": "dalal",
+     "report_filter": "Praveen",
+     "report_period": "today",
+     "confidence": 0.95
+   }
+
+   Input: "Sharma Transport se pichhle hafte kitna maal gaya"
+   Output JSON:
+   {
+     "intent": "summary", "scope": "in_scope",
+     "report_subject": "transporter",
+     "report_filter": "Sharma Transport",
+     "report_period": "last_7_days",
+     "confidence": 0.9
+   }
+
+   Input: "Rajesh ki is mahine ki saari orders"
+   Output JSON:
+   {
+     "intent": "summary", "scope": "in_scope",
+     "report_subject": "customer",
+     "report_filter": "Rajesh",
+     "report_period": "this_month",
+     "confidence": 0.9
+   }
+
+   Input: "Aaj kitna business hua"
+   Output JSON:
+   {
+     "intent": "summary", "scope": "in_scope",
+     "report_subject": "overall",
+     "report_filter": null,
+     "report_period": "today",
+     "confidence": 0.95
+   }
+
+   Input: "20 tareekh se 23 tareekh tak ka total"  (custom date range)
+   Output JSON:
+   {
+     "intent": "summary", "scope": "in_scope",
+     "report_subject": "overall",
+     "report_filter": null,
+     "report_period": "custom",
+     "report_from": "2026-04-20",
+     "report_to": "2026-04-23",
+     "confidence": 0.85
+   }
+
 ========== FUTURE-PHASE INTENTS (the bot recognises and logs these, does not act) ==========
 
 These cover shop-management commands the bot will support in a later phase.
@@ -529,13 +645,6 @@ captures what was asked.
     - "Chhotu abhi tak nahi aaya"
     - "Aaj kitne naukar aaye hain"
     Output: intent=worker, scope=future_phase, recipient_name (if a specific worker)
-
-11. SUMMARY: Business overview — daily, weekly, or specific metric.
-    Examples:
-    - "Aaj kitna business hua"
-    - "Is hafte ka total kya hai"
-    - "Sabse bada customer kaun hai"
-    Output: intent=summary, scope=future_phase, task_description (what the shopkeeper asked about)
 
 ========== UNKNOWN ==========
 

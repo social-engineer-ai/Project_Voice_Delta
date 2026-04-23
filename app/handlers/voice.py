@@ -19,6 +19,7 @@ from app.handlers.bill import (
     maybe_complete_bill_add,
     maybe_complete_bill_rates,
 )
+from app.handlers.reports import handle_summary_intent
 from app.handlers.call import handle_call_intent
 from app.handlers.delegate import handle_delegate_intent
 from app.handlers.message import handle_message_intent
@@ -201,6 +202,7 @@ async def handle_voice_message(
             "delegate": handle_delegate_intent,
             "call": handle_call_intent,
             "bill": handle_bill_intent,
+            "summary": handle_summary_intent,
         }
         handler = handlers.get(intent.intent)
         if not handler:

@@ -44,6 +44,7 @@ from app.handlers.entities import (
     list_dalals_command,
     list_transporters_command,
 )
+from app.handlers.reports import report_command
 from app.handlers.voice import (
     _get_or_create_user,
     handle_text_message,
@@ -205,6 +206,9 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("add_transporter", add_transporter_command))
     app.add_handler(CommandHandler("list_dalals", list_dalals_command))
     app.add_handler(CommandHandler("list_transporters", list_transporters_command))
+
+    # Reports (Dates branch).
+    app.add_handler(CommandHandler("report", report_command))
 
     # Voice and text messages (after enrollment handler so enrollment voices
     # are captured by the conversation first)
