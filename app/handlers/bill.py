@@ -9,6 +9,7 @@ prototype. See `SPEC_DATES.md` for scope and defaults.
 from __future__ import annotations
 
 import logging
+import re
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -92,25 +93,39 @@ def _fuzzy_match_product(db, spoken_name: str) -> Product | None:
 
 def _materialise_items(
     db, extracted_items: list[BillItemExtracted],
-) -> tuple[list[BillItem], list[tuple[BillItemExtracted, str]]]:
+) -> tuple[
+    list[BillItem],
+    list[tuple[BillItemExtracted, str]],
+    list[BillItemExtracted],
+]:
     """Convert the classifier's extracted items into BillItem rows
-    (not yet committed). Returns (accepted_rows, rejected_with_reason).
+    (not yet committed).
 
-    A line is rejected if:
-      - the product_name / quantity / rate is missing, OR
-      - the spoken product name does not fuzzy-match any active product
-        in the catalog above PRODUCT_MATCH_THRESHOLD.
+    Returns three lists:
+      - accepted: BillItem rows ready to save (product matched, all fields present).
+      - rejected: (item, reason) tuples that cannot be recovered in the
+        current flow: unknown product, missing product name, missing
+        quantity. Handler uses these to either reject the bill or hand
+        off to the password-gated catalog-add flow.
+      - rate_needed: items that match a catalog product and have
+        quantity but are missing their rate. Handler stashes these and
+        asks the shopkeeper to type the rate(s).
 
-    The caller should refuse to create the bill if any item is rejected
-    rather than silently filing unknown products. The shopkeeper then
-    re-speaks so the bill carries only catalog-known products.
+    Ordering of checks inside the loop is deliberate:
+      1. product_name + quantity exist (can't recover by any flow if missing).
+      2. product fuzzy-matches catalog (recoverable via password flow).
+      3. rate exists (recoverable via type-it-in flow).
     """
-    rows: list[BillItem] = []
+    accepted: list[BillItem] = []
     rejected: list[tuple[BillItemExtracted, str]] = []
+    rate_needed: list[BillItemExtracted] = []
+
     for x in extracted_items:
-        if not x.product_name or x.quantity is None or x.rate is None:
-            logger.warning("Rejecting incomplete item: %s", x)
-            rejected.append((x, "incomplete"))
+        if not x.product_name:
+            rejected.append((x, "missing_product_name"))
+            continue
+        if x.quantity is None:
+            rejected.append((x, "missing_quantity"))
             continue
         product = _fuzzy_match_product(db, x.product_name)
         if product is None:
@@ -121,9 +136,22 @@ def _materialise_items(
             )
             rejected.append((x, "unknown_product"))
             continue
+
+        # Product matched — now check rate. Missing rate goes to the
+        # rate-fill flow with the matched canonical name so the prompt
+        # shows a name the shopkeeper will recognise.
+        if x.rate is None:
+            rate_needed.append(BillItemExtracted(
+                product_name=product.name,
+                quantity=float(x.quantity),
+                unit=x.unit or product.default_unit or "carton",
+                rate=None,
+            ))
+            continue
+
         unit = x.unit or product.default_unit or ""
         amount = round(x.quantity * x.rate, 2)
-        rows.append(BillItem(
+        accepted.append(BillItem(
             product_id=product.id,
             product_name=product.name,
             quantity=float(x.quantity),
@@ -132,7 +160,7 @@ def _materialise_items(
             amount=amount,
             gst_rate=float(product.gst_rate),
         ))
-    return rows, rejected
+    return accepted, rejected, rate_needed
 
 
 async def handle_bill_intent(
@@ -200,7 +228,7 @@ async def handle_bill_intent(
 
     db = SessionLocal()
     try:
-        items, rejected = _materialise_items(db, intent.bill_items)
+        items, rejected, rate_needed = _materialise_items(db, intent.bill_items)
 
         # Split rejections into unknown-products (recoverable via the
         # password-gated catalog-add flow) and genuinely incomplete
@@ -221,6 +249,76 @@ async def handle_bill_intent(
             for x, reason in other_rejected:
                 lines.append(f"  • line with missing {reason}: {x.product_name or '(no name)'}")
             await update.message.reply_text("\n".join(lines))
+            return
+
+        # Rate-fill flow: if some items are known products but missing
+        # rates, ask the shopkeeper to type the rate(s) in chat. Useful
+        # when the shopkeeper prefers to keep prices private (customer
+        # in earshot) or when ASR dropped the number.
+        if rate_needed and not unknown_items:
+            # Stash the accepted items + rate_needed placeholders + the
+            # rest of the bill context. On rate reply, complete the bill.
+            context.user_data["pending_bill_rates"] = {
+                "transcript": transcript,
+                "recipient_name": intent.recipient_name,
+                "transporter": intent.transporter,
+                "bhada": float(intent.bhada),
+                "dalal": intent.dalal,
+                "dalali_percent": float(intent.dalali_percent),
+                # Items that already have rates — carry as dicts.
+                "accepted_items": [
+                    {
+                        "product_id": it.product_id,
+                        "product_name": it.product_name,
+                        "quantity": it.quantity,
+                        "unit": it.unit,
+                        "rate": it.rate,
+                        "amount": it.amount,
+                        "gst_rate": it.gst_rate,
+                    }
+                    for it in items
+                ],
+                # Items waiting on rates.
+                "rate_needed": [
+                    {
+                        "product_name": x.product_name,
+                        "quantity": x.quantity,
+                        "unit": x.unit,
+                    }
+                    for x in rate_needed
+                ],
+            }
+
+            lines_en = [
+                "Rate(s) boli nahi gayi. Sirf number text kar ke bhejo.",
+                "",
+                "In products ke rate chahiye (order mein):",
+            ]
+            lines_hi = [
+                "Rate(s) बोली नहीं गई। सिर्फ number text करके भेजिए।",
+                "",
+                "इन products के rate चाहिए (order में):",
+            ]
+            for i, x in enumerate(rate_needed, 1):
+                qline = f"  {i}. {x.product_name} ({x.quantity:g} {x.unit or 'carton'})"
+                lines_en.append(qline)
+                lines_hi.append(qline)
+            if len(rate_needed) == 1:
+                tail_en = "\nEk number text karo, jaise: 2800"
+                tail_hi = "\nएक number text कीजिए, जैसे: 2800"
+            else:
+                tail_en = (
+                    f"\n{len(rate_needed)} rates order mein text karo, "
+                    f"comma ya space se alag: 2800, 3000"
+                )
+                tail_hi = (
+                    f"\n{len(rate_needed)} rates order में text कीजिए, "
+                    f"comma या space से अलग: 2800, 3000"
+                )
+            await update.message.reply_text(
+                "\n".join(lines_en) + tail_en + "\n\n" +
+                "\n".join(lines_hi) + tail_hi
+            )
             return
 
         if unknown_items:
@@ -382,6 +480,115 @@ def _canonical_product_name(spoken: str) -> str:
     if normalized.lower().startswith("date "):
         return normalized.title().replace("'S", "'s")
     return ("Date " + normalized).title().replace("'S", "'s")
+
+
+# Regex pulls integer / decimal numbers out of free-form text, ignoring
+# currency symbols, commas inside the number, and Hindi suffixes like
+# 'rupaye'. "2,800" becomes 2800; "Rs 2800.50" becomes 2800.5.
+_RATE_NUMBER_RE = re.compile(r"(?<![\w.])(\d[\d,]*(?:\.\d+)?)(?!\w)")
+
+
+def _parse_rates(text: str) -> list[float]:
+    """Pull out all numbers from the shopkeeper's text reply. Returns
+    them in order of appearance. '2,800' is treated as 2800."""
+    matches = _RATE_NUMBER_RE.findall(text)
+    out: list[float] = []
+    for m in matches:
+        cleaned = m.replace(",", "")
+        try:
+            out.append(float(cleaned))
+        except ValueError:
+            continue
+    return out
+
+
+async def maybe_complete_bill_rates(
+    update, context, user,
+) -> bool:
+    """If there's a pending_bill_rates stash and the user has typed
+    enough numbers to fill the missing rates, materialise the full
+    bill and send the documents. Returns True if the message was
+    handled, False otherwise (which lets the caller continue normal
+    classification).
+
+    Called before maybe_complete_bill_add in the text handler.
+    """
+    pending = context.user_data.get("pending_bill_rates")
+    if not pending:
+        return False
+
+    text = (update.message.text or "").strip()
+    parsed = _parse_rates(text)
+    needed = pending["rate_needed"]
+
+    if not parsed:
+        # No numbers at all — assume the shopkeeper is abandoning the
+        # flow (sending a different command). Clear stash and fall
+        # through so normal classification handles the new message.
+        context.user_data.pop("pending_bill_rates", None)
+        logger.info("pending_bill_rates cleared (non-numeric reply).")
+        return False
+
+    if len(parsed) < len(needed):
+        # Partial reply — ask for the rest rather than silently eating
+        # the first rate.
+        await update.message.reply_text(
+            f"Sirf {len(parsed)} rate(s) mili, {len(needed)} chahiye. "
+            f"Sab ek saath text karo, jaise: "
+            f"{', '.join(str(1000 + i * 100) for i in range(len(needed)))}\n\n"
+            f"सिर्फ {len(parsed)} rate(s) मिली, {len(needed)} चाहिए। "
+            f"सब एक साथ text कीजिए।"
+        )
+        return True
+
+    if len(parsed) > len(needed):
+        # Too many numbers — use the first N.
+        logger.info(
+            "Got %d rates but only %d needed; using the first %d.",
+            len(parsed), len(needed), len(needed),
+        )
+        parsed = parsed[:len(needed)]
+
+    # Reconstruct the full intent with all rates now filled.
+    all_items_dicts = list(pending["accepted_items"])
+    for placeholder, rate in zip(needed, parsed):
+        all_items_dicts.append({
+            "product_name": placeholder["product_name"],
+            "quantity": placeholder["quantity"],
+            "unit": placeholder["unit"],
+            "rate": float(rate),
+        })
+
+    intent = IntentClassification(
+        intent="bill", scope="in_scope",
+        recipient_name=pending["recipient_name"],
+        transporter=pending["transporter"],
+        bhada=pending["bhada"],
+        dalal=pending.get("dalal"),
+        dalali_percent=pending.get("dalali_percent"),
+        bill_items=[
+            BillItemExtracted(
+                product_name=d.get("product_name"),
+                quantity=d.get("quantity"),
+                unit=d.get("unit"),
+                rate=d.get("rate"),
+            )
+            for d in all_items_dicts
+        ],
+        confidence=0.95,
+    )
+    context.user_data["last_transcript"] = pending.get("transcript") or ""
+    context.user_data.pop("pending_bill_rates", None)
+
+    rates_preview = ", ".join(
+        f"{p['product_name']} = ₹{r:,.0f}" for p, r in zip(needed, parsed)
+    )
+    await update.message.reply_text(
+        f"Rates mil gaye: {rates_preview}. Bill banaya ja raha hai...\n\n"
+        f"Rates मिल गए: {rates_preview}। बिल बनाया जा रहा है..."
+    )
+    await handle_bill_intent(update, context, user, intent)
+    return True
 
 
 async def maybe_complete_bill_add(

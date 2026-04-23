@@ -14,7 +14,11 @@ from telegram.ext import ContextTypes
 
 from app.db.session import SessionLocal
 from app.db.models import FuturePhaseLog, User
-from app.handlers.bill import handle_bill_intent, maybe_complete_bill_add
+from app.handlers.bill import (
+    handle_bill_intent,
+    maybe_complete_bill_add,
+    maybe_complete_bill_rates,
+)
 from app.handlers.call import handle_call_intent
 from app.handlers.delegate import handle_delegate_intent
 from app.handlers.message import handle_message_intent
@@ -68,9 +72,12 @@ async def handle_voice_message(
 
     # A fresh voice message invalidates any pending password-gated
     # catalog-add — the shopkeeper is evidently choosing to re-speak
-    # instead of confirming the earlier bill.
+    # instead of confirming the earlier bill. Same for the rate-fill
+    # pending stash: a new voice command supersedes it.
     if context.user_data.pop("pending_bill_add", None) is not None:
         logger.info("New voice message cleared pending catalog-add state.")
+    if context.user_data.pop("pending_bill_rates", None) is not None:
+        logger.info("New voice message cleared pending rate-fill state.")
 
     # Step 1: Download the voice file
     voice = update.message.voice
@@ -229,11 +236,11 @@ async def handle_text_message(
     if not text:
         return
 
-    # If a bill is waiting on the catalog-add password, handle that
-    # before running the classifier. maybe_complete_bill_add returns
-    # True if it handled the message fully (password matched + bill
-    # created), False to continue normal classification (wrong
-    # password, or no pending state).
+    # Two pending-state intercepts to check before classification.
+    # Order matters: rate-fill first, then password-catalog-add, then
+    # fall through to the classifier for normal commands.
+    if await maybe_complete_bill_rates(update, context, user):
+        return
     if await maybe_complete_bill_add(update, context, user):
         return
 
