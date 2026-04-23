@@ -38,6 +38,12 @@ from app.handlers.enrollment import (
     set_security_command,
     voice_status_command,
 )
+from app.handlers.entities import (
+    add_dalal_command,
+    add_transporter_command,
+    list_dalals_command,
+    list_transporters_command,
+)
 from app.handlers.voice import (
     _get_or_create_user,
     handle_text_message,
@@ -193,6 +199,12 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("security", set_security_command))
     app.add_handler(CommandHandler("voicestatus", voice_status_command))
     app.add_handler(CommandHandler("resetvoice", reset_voice_command))
+
+    # Dalal + Transporter catalog management (Dates branch).
+    app.add_handler(CommandHandler("add_dalal", add_dalal_command))
+    app.add_handler(CommandHandler("add_transporter", add_transporter_command))
+    app.add_handler(CommandHandler("list_dalals", list_dalals_command))
+    app.add_handler(CommandHandler("list_transporters", list_transporters_command))
 
     # Voice and text messages (after enrollment handler so enrollment voices
     # are captured by the conversation first)

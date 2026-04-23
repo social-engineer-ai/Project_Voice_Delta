@@ -18,7 +18,7 @@ from rapidfuzz import fuzz, process
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from app.db.models import Bill, BillItem, Product, User
+from app.db.models import Bill, BillItem, Dalal, Product, Transporter, User
 from app.db.session import SessionLocal
 from app.services.bill_format import (
     format_bill_message,
@@ -33,10 +33,14 @@ from app.services.tally_export import write_sales_voucher_xml
 logger = logging.getLogger(__name__)
 
 
-# Fuzzy-match threshold (0-100). Below this, we keep the spoken name
-# as-is and don't link to a Product row. Tuned loose enough to forgive
-# typical ASR drift on dates names.
+# Fuzzy-match thresholds (0-100). Product names carry more ASR drift
+# and have more aliases per row, so a looser threshold helps. Dalal
+# and transporter names are more restricted and share common words
+# ("transport", "dalal") that would otherwise produce false matches,
+# so a stricter threshold is safer.
 PRODUCT_MATCH_THRESHOLD = 70
+DALAL_MATCH_THRESHOLD = 85
+TRANSPORTER_MATCH_THRESHOLD = 85
 
 # Hardcoded password for catalog-add confirmation. Not production auth
 # — this is a demo convenience so only the shopkeeper (who knows the
@@ -55,23 +59,22 @@ def _next_bill_number(db) -> str:
     return f"{prefix}{count + 1:03d}"
 
 
-def _fuzzy_match_product(db, spoken_name: str) -> Product | None:
-    """Find the best-matching Product for the spoken product name.
-
-    We build a candidate list of (canonical_name, product_id) pairs
-    where canonical_name is both the Product.name and each of its
-    aliases. rapidfuzz picks the best fuzzy match; if the score is
-    above the threshold, we return that Product, otherwise None.
-    """
+def _fuzzy_match_generic(
+    db, spoken_name: str, model_cls, threshold: int = PRODUCT_MATCH_THRESHOLD,
+):
+    """Shared fuzzy-match routine: finds the best row in `model_cls`
+    whose name or alias fuzzy-matches `spoken_name`. Returns the row
+    or None. Used for Product, Dalal, Transporter — all three follow
+    the same (name, aliases[], is_active) shape."""
     if not spoken_name:
         return None
     spoken_lower = spoken_name.strip().lower()
 
     candidates: dict[str, int] = {}
-    for p in db.query(Product).filter(Product.is_active == 1).all():
-        candidates[p.name.lower()] = p.id
-        for alias in (p.aliases or []):
-            candidates[str(alias).lower()] = p.id
+    for row in db.query(model_cls).filter(model_cls.is_active == 1).all():
+        candidates[row.name.lower()] = row.id
+        for alias in (row.aliases or []):
+            candidates[str(alias).lower()] = row.id
 
     if not candidates:
         return None
@@ -82,13 +85,25 @@ def _fuzzy_match_product(db, spoken_name: str) -> Product | None:
     if not match:
         return None
     name, score, _ = match
-    if score < PRODUCT_MATCH_THRESHOLD:
+    if score < threshold:
         logger.info(
-            "Product fuzzy match below threshold: spoken=%r best=%r score=%d",
-            spoken_name, name, score,
+            "%s fuzzy match below threshold: spoken=%r best=%r score=%d",
+            model_cls.__name__, spoken_name, name, score,
         )
         return None
-    return db.query(Product).get(candidates[name])
+    return db.query(model_cls).get(candidates[name])
+
+
+def _fuzzy_match_product(db, spoken_name: str) -> Product | None:
+    return _fuzzy_match_generic(db, spoken_name, Product)
+
+
+def _fuzzy_match_dalal(db, spoken_name: str) -> Dalal | None:
+    return _fuzzy_match_generic(db, spoken_name, Dalal, DALAL_MATCH_THRESHOLD)
+
+
+def _fuzzy_match_transporter(db, spoken_name: str) -> Transporter | None:
+    return _fuzzy_match_generic(db, spoken_name, Transporter, TRANSPORTER_MATCH_THRESHOLD)
 
 
 def _materialise_items(
@@ -230,6 +245,23 @@ async def handle_bill_intent(
     try:
         items, rejected, rate_needed = _materialise_items(db, intent.bill_items)
 
+        # Normalise transporter + dalal to catalog entities. Same
+        # pattern as products: fuzzy-match; unknown names go to the
+        # password-gated add flow alongside unknown products. Special
+        # cases: dalal="None" means "no broker" and skips the match
+        # (bill gets dalal_id=None + dalal name="None" snapshot).
+        transporter_row = _fuzzy_match_transporter(db, intent.transporter)
+        unknown_transporter_name: str | None = None
+        if transporter_row is None:
+            unknown_transporter_name = intent.transporter
+
+        dalal_row = None
+        unknown_dalal_name: str | None = None
+        if intent.dalal and intent.dalal.lower() != "none":
+            dalal_row = _fuzzy_match_dalal(db, intent.dalal)
+            if dalal_row is None:
+                unknown_dalal_name = intent.dalal
+
         # Split rejections into unknown-products (recoverable via the
         # password-gated catalog-add flow) and genuinely incomplete
         # lines (not recoverable by adding a product). Unknown products
@@ -321,9 +353,9 @@ async def handle_bill_intent(
             )
             return
 
-        if unknown_items:
-            # Stash the full classifier output + unknown product items
-            # so a subsequent "121" text can complete the flow.
+        if unknown_items or unknown_dalal_name or unknown_transporter_name:
+            # Stash whatever is unknown (products + dalal + transporter)
+            # so the password flow can add all of them together.
             context.user_data["pending_bill_add"] = {
                 "transcript": transcript,
                 "recipient_name": intent.recipient_name,
@@ -336,22 +368,37 @@ async def handle_bill_intent(
                     (i.product_name, i.unit or "carton")
                     for i in unknown_items
                 ],
+                "unknown_dalal_name": unknown_dalal_name,
+                "unknown_transporter_name": unknown_transporter_name,
             }
-            names_desc = "\n".join(
-                f"  • {x.product_name} (qty={x.quantity:g} {x.unit or 'carton'}, rate={x.rate})"
-                for x in unknown_items
-            )
+
+            desc_lines: list[str] = []
+            if unknown_items:
+                desc_lines.append("Products:")
+                for x in unknown_items:
+                    desc_lines.append(
+                        f"  • {x.product_name} (qty={x.quantity:g} "
+                        f"{x.unit or 'carton'}, rate={x.rate})"
+                    )
+            if unknown_transporter_name:
+                desc_lines.append(f"Transporter: {unknown_transporter_name}")
+            if unknown_dalal_name:
+                desc_lines.append(
+                    f"Dalal: {unknown_dalal_name} ({intent.dalali_percent:g}%)"
+                )
+            names_desc = "\n".join(desc_lines)
+
             await update.message.reply_text(
-                f"Yeh products catalog mein nahi mile:\n{names_desc}\n\n"
+                f"Yeh catalog mein nahi mile:\n{names_desc}\n\n"
                 f"Agar add karna chahte ho to password text kar ke bhejo "
                 f"({CATALOG_ADD_PASSWORD} bhejna hai). Password bhejte hi "
-                f"products add ho jaayenge aur bill ban jaayega.\n\n"
+                f"entities add ho jaayengi aur bill ban jaayega.\n\n"
                 f"Nahi to dobara clearly bolke voice bhejiye.\n\n"
                 f"---\n"
-                f"ये products catalog में नहीं मिले:\n{names_desc}\n\n"
+                f"ये catalog में नहीं मिले:\n{names_desc}\n\n"
                 f"अगर add करना चाहते हैं तो password text करके भेजिए "
                 f"({CATALOG_ADD_PASSWORD} भेजना है)। Password भेजते ही "
-                f"products add हो जाएँगे और bill बन जाएगा।\n\n"
+                f"entities add हो जाएँगी और bill बन जाएगा।\n\n"
                 f"नहीं तो दोबारा clearly बोलकर voice भेजिए।"
             )
             return
@@ -379,6 +426,18 @@ async def handle_bill_intent(
         dalali_amount = round(subtotal * dalali_pct / 100, 2)
         total = round(subtotal + tax_amount + bhada_amount, 2)
 
+        # By this point transporter_row and dalal_row are resolved (or
+        # None for the explicit no-broker / no-match-needed cases). Use
+        # the canonical catalog names on the bill snapshot so downstream
+        # reports can group by canonical name without re-normalising.
+        transporter_canonical = (
+            transporter_row.name if transporter_row else intent.transporter
+        )
+        dalal_canonical = (
+            dalal_row.name if dalal_row
+            else (intent.dalal if intent.dalal else None)
+        )
+
         bill = Bill(
             user_id=user.id,
             bill_number=_next_bill_number(db),
@@ -386,9 +445,11 @@ async def handle_bill_intent(
             bill_date=datetime.utcnow(),
             subtotal=round(subtotal, 2),
             tax_amount=tax_amount,
-            transporter=intent.transporter,
+            transporter_id=transporter_row.id if transporter_row else None,
+            transporter=transporter_canonical,
             bhada=bhada_amount,
-            dalal=intent.dalal,
+            dalal_id=dalal_row.id if dalal_row else None,
+            dalal=dalal_canonical,
             dalali_percent=dalali_pct,
             dalali_amount=dalali_amount,
             total=total,
@@ -616,10 +677,11 @@ async def maybe_complete_bill_add(
         logger.info("Pending catalog-add cleared (wrong password or new command).")
         return False
 
-    # Password matched — add the unknown products, then create the bill.
+    # Password matched — add the unknown products / dalal / transporter,
+    # then create the bill.
     db = SessionLocal()
     try:
-        added_names: list[str] = []
+        added_products: list[str] = []
         for spoken_name, unit in pending["unknown_product_names"]:
             canonical = _canonical_product_name(spoken_name)
             if not canonical:
@@ -638,11 +700,48 @@ async def maybe_complete_bill_add(
                 gst_rate=18.0,
                 is_active=1,
             ))
-            added_names.append(canonical)
+            added_products.append(canonical)
+
+        added_dalal: str | None = None
+        unknown_dalal = pending.get("unknown_dalal_name")
+        if unknown_dalal:
+            # Canonicalise dalal name: title-case, trimmed.
+            d_canonical = unknown_dalal.strip().title()
+            existing = db.query(Dalal).filter(Dalal.name == d_canonical).first()
+            if existing:
+                if not existing.is_active:
+                    existing.is_active = 1
+            else:
+                db.add(Dalal(
+                    name=d_canonical,
+                    aliases=[unknown_dalal.lower(), d_canonical.lower()],
+                    default_percent=pending.get("dalali_percent"),
+                    is_active=1,
+                ))
+                added_dalal = d_canonical
+
+        added_transporter: str | None = None
+        unknown_transporter = pending.get("unknown_transporter_name")
+        if unknown_transporter:
+            t_canonical = unknown_transporter.strip().title()
+            existing = db.query(Transporter).filter(
+                Transporter.name == t_canonical
+            ).first()
+            if existing:
+                if not existing.is_active:
+                    existing.is_active = 1
+            else:
+                db.add(Transporter(
+                    name=t_canonical,
+                    aliases=[unknown_transporter.lower(), t_canonical.lower()],
+                    is_active=1,
+                ))
+                added_transporter = t_canonical
+
         db.commit()
         logger.info(
-            "Catalog-add via password: %d new products (%s)",
-            len(added_names), added_names,
+            "Catalog-add via password: %d new products, dalal=%s, transporter=%s",
+            len(added_products), added_dalal, added_transporter,
         )
 
         # Reconstruct the bill classification from the stashed state and
@@ -664,11 +763,20 @@ async def maybe_complete_bill_add(
     finally:
         db.close()
 
+    summary_bits = []
+    if added_products:
+        summary_bits.append(f"{len(added_products)} product(s)")
+    if added_dalal:
+        summary_bits.append(f"dalal '{added_dalal}'")
+    if added_transporter:
+        summary_bits.append(f"transporter '{added_transporter}'")
+    summary = ", ".join(summary_bits) if summary_bits else "nothing new"
+
     await update.message.reply_text(
-        f"Password confirm ho gaya. {len(added_names)} product(s) catalog "
-        f"mein add kar diye. Bill banaya ja raha hai...\n\n"
-        f"Password confirm हो गया। {len(added_names)} product(s) catalog "
-        f"में add कर दिए। बिल बनाया जा रहा है..."
+        f"Password confirm ho gaya. Add kiya: {summary}. "
+        f"Bill banaya ja raha hai...\n\n"
+        f"Password confirm हो गया। Add किया: {summary}। "
+        f"बिल बनाया जा रहा है..."
     )
     # Re-enter the main handler with the reconstructed intent.
     await handle_bill_intent(update, context, user, intent)

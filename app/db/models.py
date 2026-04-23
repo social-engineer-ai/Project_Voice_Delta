@@ -118,6 +118,44 @@ class Product(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class Dalal(Base):
+    """A broker (dalal) the shop works with.
+
+    Added 2026-04-23 on the Dates branch. Mirrors the Product pattern:
+    `name` is the canonical display name, `aliases` holds alternate
+    spellings and common ASR drift for fuzzy-matching. Created by the
+    shopkeeper via /add_dalal slash command or via the bill-flow
+    password-gated add. `default_percent` is convenience only —
+    shopkeepers still speak the actual percent on each bill.
+    """
+    __tablename__ = "dalals"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255), nullable=False, unique=True, index=True)
+    aliases = Column(JSON, default=list)
+    phone = Column(String(32), nullable=True)
+    default_percent = Column(Float, nullable=True)
+    is_active = Column(Integer, default=1)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class Transporter(Base):
+    """A transport firm the shop uses.
+
+    Same pattern as Dalal. `default_bhada` is convenience only — the
+    shopkeeper speaks the actual bhada on each bill.
+    """
+    __tablename__ = "transporters"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255), nullable=False, unique=True, index=True)
+    aliases = Column(JSON, default=list)
+    phone = Column(String(32), nullable=True)
+    default_bhada = Column(Float, nullable=True)
+    is_active = Column(Integer, default=1)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class Bill(Base):
     """A bill / sales invoice header. Line items live on BillItem.
 
@@ -134,9 +172,11 @@ class Bill(Base):
     bill_date = Column(DateTime, default=datetime.utcnow, index=True)
     subtotal = Column(Float, nullable=False, default=0.0)
     tax_amount = Column(Float, nullable=False, default=0.0)
-    # Transport fields — added 2026-04-23. Captured from the voice command
-    # alongside products. The Tally XML adds a Freight ledger credit for
-    # `bhada` so the grand total on the voucher reconciles.
+    # Transport fields — added 2026-04-23. `transporter` is the canonical
+    # name snapshot (matches Transporter.name at write time);
+    # `transporter_id` is a nullable FK for report queries. Same snapshot
+    # + FK pattern as BillItem.product_name / product_id.
+    transporter_id = Column(Integer, ForeignKey("transporters.id"), nullable=True)
     transporter = Column(String(255), nullable=True)
     bhada = Column(Float, nullable=False, default=0.0)
     # Broker fields — added 2026-04-23. Convention: dalali is tracked on
@@ -144,6 +184,7 @@ class Bill(Base):
     # added to the customer's grand total (dalali is a shop-to-dalal
     # payable, not a customer receivable). `dalali_amount` is the
     # computed absolute amount = subtotal * dalali_percent / 100.
+    dalal_id = Column(Integer, ForeignKey("dalals.id"), nullable=True)
     dalal = Column(String(255), nullable=True)
     dalali_percent = Column(Float, nullable=False, default=0.0)
     dalali_amount = Column(Float, nullable=False, default=0.0)
