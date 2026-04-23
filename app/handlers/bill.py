@@ -50,13 +50,17 @@ TRANSPORTER_MATCH_THRESHOLD = 85
 CATALOG_ADD_PASSWORD = "121"
 
 
-def _next_bill_number(db) -> str:
-    """Simple monotonic bill number: DEMO-YYYYMMDD-###."""
+def _next_bill_number(db, document_type: str = "bill") -> str:
+    """Monotonic bill number. Prefix depends on document type so that
+    bills and quotations have non-colliding numbers:
+      - BILL-YYYYMMDD-###  for document_type="bill"
+      - QT-YYYYMMDD-###    for document_type="quotation"
+    """
     today = datetime.utcnow().strftime("%Y%m%d")
-    prefix = f"DEMO-{today}-"
-    # Count today's bills to generate the suffix.
-    count = db.query(Bill).filter(Bill.bill_number.like(f"{prefix}%")).count()
-    return f"{prefix}{count + 1:03d}"
+    prefix = "QT" if document_type == "quotation" else "BILL"
+    full_prefix = f"{prefix}-{today}-"
+    count = db.query(Bill).filter(Bill.bill_number.like(f"{full_prefix}%")).count()
+    return f"{full_prefix}{count + 1:03d}"
 
 
 def _fuzzy_match_generic(
@@ -417,14 +421,23 @@ async def handle_bill_intent(
         # Mixed-rate baskets aren't common at a dates trader; will
         # revisit if they show up.
         gst_pct = items[0].gst_rate
-        tax_amount = round(subtotal * gst_pct / 100, 2)
         bhada_amount = float(intent.bhada or 0.0)
         # Dalali: informational only — computed from subtotal but NOT
         # added to the customer's grand total. It sits on the bill so
         # the shopkeeper knows their payable to the dalal.
         dalali_pct = float(intent.dalali_percent or 0.0)
         dalali_amount = round(subtotal * dalali_pct / 100, 2)
-        total = round(subtotal + tax_amount + bhada_amount, 2)
+
+        # Quotations are price estimates without GST — tax_amount=0,
+        # total excludes GST. The document still records gst_pct so
+        # the quotation PDF can footnote "+ X% GST if billed".
+        document_type = (intent.document_type or "bill").lower()
+        if document_type == "quotation":
+            tax_amount = 0.0
+            total = round(subtotal + bhada_amount, 2)
+        else:
+            tax_amount = round(subtotal * gst_pct / 100, 2)
+            total = round(subtotal + tax_amount + bhada_amount, 2)
 
         # By this point transporter_row and dalal_row are resolved (or
         # None for the explicit no-broker / no-match-needed cases). Use
@@ -440,7 +453,8 @@ async def handle_bill_intent(
 
         bill = Bill(
             user_id=user.id,
-            bill_number=_next_bill_number(db),
+            bill_number=_next_bill_number(db, document_type),
+            document_type=document_type,
             customer_name=intent.recipient_name,
             bill_date=datetime.utcnow(),
             subtotal=round(subtotal, 2),
@@ -478,17 +492,28 @@ async def handle_bill_intent(
             render_bill_pdf(bill, pdf_path)
             write_sales_voucher_xml(bill, xml_path)
 
+            is_quotation = bill.document_type == "quotation"
+            pdf_caption = (
+                "Customer quotation PDF (shareable with customer — no GST)"
+                if is_quotation
+                else "Customer bill PDF (shareable with customer)"
+            )
+            xml_caption = (
+                "Tally import file (Quotation Voucher XML)"
+                if is_quotation
+                else "Tally import file (Sales Voucher XML)"
+            )
             with open(pdf_path, "rb") as f:
                 await update.message.reply_document(
                     document=f,
                     filename=pdf_path.name,
-                    caption="Customer bill PDF (shareable with customer)",
+                    caption=pdf_caption,
                 )
             with open(xml_path, "rb") as f:
                 await update.message.reply_document(
                     document=f,
                     filename=xml_path.name,
-                    caption="Tally import file (Sales Voucher XML)",
+                    caption=xml_caption,
                 )
 
             # 3. Dalal memo — only when a real broker + commission is set.

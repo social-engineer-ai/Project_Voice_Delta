@@ -168,6 +168,10 @@ class Bill(Base):
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     bill_number = Column(String(32), nullable=False, unique=True, index=True)
+    # 'bill' = GST invoice (Tally Sales Voucher generated).
+    # 'quotation' = price estimate without GST (no Tally XML).
+    # Added 2026-04-23 to support dual-mode output.
+    document_type = Column(String(16), nullable=False, default="bill", index=True)
     customer_name = Column(String(255), nullable=False)
     bill_date = Column(DateTime, default=datetime.utcnow, index=True)
     subtotal = Column(Float, nullable=False, default=0.0)

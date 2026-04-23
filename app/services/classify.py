@@ -92,7 +92,7 @@ _GEMINI_DISALLOWED_KEYS = frozenset(
 # after observing Flash-Lite omit optional fields like bill_items and
 # recipient_name even with very explicit prompt instructions.
 _FORCE_REQUIRED_TOP_LEVEL: frozenset[str] = frozenset({
-    "intent", "scope", "recipient_name", "bill_items",
+    "intent", "scope", "recipient_name", "bill_items", "document_type",
     "transporter", "bhada", "dalal", "dalali_percent",
     "report_subject", "report_filter", "report_period",
     "confidence",
@@ -252,6 +252,16 @@ class IntentClassification(BaseModel):
             "For 'bill' intent only: up to 3 line items extracted from the "
             "voice command. Each has product_name, quantity, unit, rate. "
             "Null for every other intent."
+        ),
+    )
+    document_type: Optional[str] = Field(
+        default=None,
+        description=(
+            "For 'bill' intent only: 'bill' when the speaker wants a GST "
+            "invoice / sales bill ('bill banao', 'invoice banao'). "
+            "'quotation' when they want a price estimate without GST "
+            "('quotation banao', 'quote banao', 'rate batao', 'estimate "
+            "banao'). Default 'bill' if ambiguous. Null for every other intent."
         ),
     )
     transporter: Optional[str] = Field(
@@ -414,17 +424,23 @@ The shopkeeper will speak one of twelve kinds of commands, split into two groups
    - "Sharma ji ko phone lagao"
    Output: intent=call, scope=in_scope, recipient_name
 
-5. BILL: Create a sales bill / invoice for a customer. Triggered by
-   phrases like "bill banao", "bill bana do", "invoice banao", "bill
-   for <name>". You MUST populate all SIX of: recipient_name (the
-   customer), bill_items (at least one line item with product_name,
-   quantity, unit, and rate), transporter (who moves the goods),
-   bhada (freight charge in INR), dalal (the broker's name, or 'None'
-   if direct), and dalali_percent (the broker's commission as a
-   percent, or 0 if no broker) when you return intent=bill. If any of
-   these cannot be extracted clearly, still return intent=bill with
-   the fields you have and leave the missing ones null — the
-   downstream handler will ask the speaker for the missing pieces.
+5. BILL: Create either a sales bill (GST invoice) or a quotation
+   (price estimate without GST). Triggered by phrases like "bill
+   banao", "invoice banao", "quotation banao", "quote banao",
+   "rate batao", "estimate banao". You MUST populate all SEVEN of:
+   recipient_name, bill_items (at least one line item with product_name,
+   quantity, unit, rate), transporter, bhada, dalal ('None' if direct),
+   dalali_percent (0 if no broker), and document_type ('bill' for GST
+   invoice or 'quotation' for a no-GST estimate). If any of these
+   cannot be extracted clearly, still return intent=bill with the
+   fields you have and leave the missing ones null — the downstream
+   handler will ask the speaker for the missing pieces.
+
+   document_type selection:
+   - "bill", "invoice", "pakka bill", "GST bill" -> "bill"
+   - "quotation", "quote", "rate", "rate batao", "estimate", "kachha",
+     "rate card", "rate list" -> "quotation"
+   - Ambiguous or unclear -> "bill" (the default).
 
    IMPORTANT FOR BILL: recipient_name and every bill_items[].product_name
    must be written in LATIN SCRIPT (English transliteration), even when
@@ -519,10 +535,45 @@ The shopkeeper will speak one of twelve kinds of commands, split into two groups
        {"product_name": "Ajwa", "quantity": 5, "unit": "carton", "rate": 2100},
        {"product_name": "Tetco", "quantity": 3, "unit": "carton", "rate": 2200}
      ],
+     "document_type": "bill",
      "transporter": null,
      "bhada": null,
      "dalal": null,
      "dalali_percent": null,
+     "confidence": 0.9
+   }
+
+   Input: "Rajesh ke liye quotation banao 5 carton Date Ajwa rate 2800, Sharma Transport bhada 500, no dalal"
+   Output JSON:
+   {
+     "intent": "bill",
+     "scope": "in_scope",
+     "recipient_name": "Rajesh",
+     "bill_items": [
+       {"product_name": "Date Ajwa", "quantity": 5, "unit": "carton", "rate": 2800}
+     ],
+     "document_type": "quotation",
+     "transporter": "Sharma Transport",
+     "bhada": 500,
+     "dalal": "None",
+     "dalali_percent": 0,
+     "confidence": 0.95
+   }
+
+   Input: "Mukesh ko rate batao 10 cartons Date Medjool 4200, self pickup, Praveen dalal 1.5 percent"
+   Output JSON:
+   {
+     "intent": "bill",
+     "scope": "in_scope",
+     "recipient_name": "Mukesh",
+     "bill_items": [
+       {"product_name": "Date Medjool", "quantity": 10, "unit": "carton", "rate": 4200}
+     ],
+     "document_type": "quotation",
+     "transporter": "Self",
+     "bhada": 0,
+     "dalal": "Praveen",
+     "dalali_percent": 1.5,
      "confidence": 0.9
    }
 

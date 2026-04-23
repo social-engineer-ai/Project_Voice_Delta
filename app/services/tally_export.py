@@ -89,26 +89,30 @@ def build_sales_voucher_xml(
     request_data = SubElement(import_data, "REQUESTDATA")
     tally_msg = SubElement(request_data, "TALLYMESSAGE", **{"xmlns:UDF": "TallyUDF"})
 
+    # Voucher type branches on document_type:
+    #   'bill'      -> Sales voucher (booked, accounting entries, tax ledgers)
+    #   'quotation' -> Quotation voucher (non-accounting in Tally; inventory +
+    #                  party + sales + freight, no tax ledgers)
+    is_quotation = getattr(bill, "document_type", "bill") == "quotation"
+    vchtype = "Quotation" if is_quotation else "Sales"
+    objview = "Invoice Voucher View" if not is_quotation else "Order Voucher View"
+
     voucher = SubElement(
         tally_msg, "VOUCHER",
-        VCHTYPE="Sales", ACTION="Create",
-        OBJVIEW="Invoice Voucher View",
+        VCHTYPE=vchtype, ACTION="Create",
+        OBJVIEW=objview,
     )
     # Tally date format: YYYYMMDD
     _sub(voucher, "DATE", bill.bill_date.strftime("%Y%m%d"))
-    _sub(voucher, "VOUCHERTYPENAME", "Sales")
+    _sub(voucher, "VOUCHERTYPENAME", vchtype)
     _sub(voucher, "VOUCHERNUMBER", bill.bill_number)
     _sub(voucher, "PARTYLEDGERNAME", bill.customer_name)
     _sub(voucher, "BASICBUYERNAME", bill.customer_name)
-    _sub(voucher, "ISINVOICE", "Yes")
-    # Narration captures transporter + bhada so the voucher carries the
-    # context even when opened outside Tally. Tally preserves NARRATION
-    # on import and shows it in the voucher detail view.
-    # Narration is on the shop's customer-ledger sales voucher; kept
-    # dalal-free to mirror the customer-bill convention. Dalal context
-    # lives on a separate dalal memo document (bill_format.render_dalal_memo_pdf)
-    # that the shopkeeper keeps outside Tally.
-    narration_parts = [f"Voice-generated bill for {bill.customer_name}"]
+    # ISINVOICE marks this as an invoice-style voucher. For quotations
+    # the flag stays "No" so Tally doesn't treat it as a GST invoice.
+    _sub(voucher, "ISINVOICE", "No" if is_quotation else "Yes")
+    narration_kind = "quotation" if is_quotation else "bill"
+    narration_parts = [f"Voice-generated {narration_kind} for {bill.customer_name}"]
     if bill.transporter:
         narration_parts.append(f"Transporter: {bill.transporter}")
     if bill.bhada:
@@ -135,15 +139,19 @@ def build_sales_voucher_xml(
         _sub(acc_list, "ISDEEMEDPOSITIVE", "No")
         _sub(acc_list, "AMOUNT", f"-{item.amount:.2f}")
 
-    # Ledger entries — party (debit grand total), sales (credit subtotal),
-    # tax ledgers (credit tax), freight (credit bhada if > 0). The
-    # party-debit sum equals subtotal + tax + bhada = grand total.
+    # Ledger entries. Layout depends on document_type:
+    #   Bill:       party debit (subtotal+GST+bhada) = sales credit (subtotal)
+    #               + CGST/SGST credits (tax) + freight credit (bhada).
+    #   Quotation:  party debit (subtotal+bhada) = sales credit (subtotal)
+    #               + freight credit (bhada). No tax ledgers because
+    #               quotations aren't booked and carry no GST.
     _ledger_entry(voucher, bill.customer_name, bill.total, is_party=True)
     _ledger_entry(voucher, SALES_LEDGER, bill.subtotal, is_party=False)
-    # Split tax into CGST + SGST 50/50 (common intra-state scenario).
-    half_tax = bill.tax_amount / 2
-    _ledger_entry(voucher, CGST_LEDGER, half_tax, is_party=False)
-    _ledger_entry(voucher, SGST_LEDGER, half_tax, is_party=False)
+    if not is_quotation:
+        # Split tax into CGST + SGST 50/50 (common intra-state scenario).
+        half_tax = bill.tax_amount / 2
+        _ledger_entry(voucher, CGST_LEDGER, half_tax, is_party=False)
+        _ledger_entry(voucher, SGST_LEDGER, half_tax, is_party=False)
     # Freight: only emit if bhada > 0. Self-pickup (bhada=0) skips this
     # ledger so the voucher doesn't reference a ledger that may not exist
     # in the shop's chart of accounts for cash / self-pickup sales.

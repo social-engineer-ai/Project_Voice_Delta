@@ -155,20 +155,22 @@ def render_report_pdf(result: ReportResult, output_path: Path) -> Path:
 
     # Bills table.
     if result.bills:
-        header = ["Bill #", "Date", "Customer", "Dalal", "Transp", "Total"]
+        header = ["Doc #", "Type", "Date", "Customer", "Dalal", "Transp", "Total"]
         data = [header]
         for b in result.bills:
+            type_label = "Q" if getattr(b, "document_type", "bill") == "quotation" else "B"
             data.append([
                 b.bill_number,
+                type_label,
                 b.bill_date.strftime("%d-%b"),
-                (b.customer_name or "")[:18],
+                (b.customer_name or "")[:16],
                 (b.dalal or "-")[:12] if b.dalal and b.dalal.lower() != "none" else "-",
                 (b.transporter or "-")[:12],
                 f"₹ {b.total:,.0f}",
             ])
         bills_table = Table(
             data, hAlign="LEFT",
-            colWidths=[24 * mm, 14 * mm, 30 * mm, 22 * mm, 22 * mm, 20 * mm],
+            colWidths=[22 * mm, 8 * mm, 12 * mm, 28 * mm, 20 * mm, 20 * mm, 20 * mm],
             repeatRows=1,
         )
         bills_table.setStyle(TableStyle([
@@ -310,16 +312,19 @@ def render_report_html(result: ReportResult, output_path: Path) -> Path:
     summary_stats = "\n".join(stats_html)
 
     if result.bills:
-        rows_html = ["<h2>Bills</h2>", "<table>", "<thead><tr>",
-                     "<th>Bill #</th><th>Date</th><th>Customer</th>",
+        rows_html = ["<h2>Bills &amp; Quotations</h2>", "<table>", "<thead><tr>",
+                     "<th>Doc #</th><th>Type</th><th>Date</th><th>Customer</th>",
                      "<th>Dalal</th><th>Transporter</th>",
                      "<th class='num'>Subtotal</th><th class='num'>Bhada</th>",
                      "<th class='num'>Total</th>",
                      "</tr></thead><tbody>"]
         for b in result.bills:
             dalal_cell = (b.dalal if b.dalal and b.dalal.lower() != "none" else "-")
+            doc_type = getattr(b, "document_type", "bill")
+            type_label = "Quotation" if doc_type == "quotation" else "Bill"
             rows_html.append("<tr>")
             rows_html.append(f"<td>{html_escape.escape(b.bill_number)}</td>")
+            rows_html.append(f"<td>{html_escape.escape(type_label)}</td>")
             rows_html.append(f"<td>{b.bill_date.strftime('%d-%b-%Y')}</td>")
             rows_html.append(f"<td>{html_escape.escape(b.customer_name or '')}</td>")
             rows_html.append(f"<td>{html_escape.escape(dalal_cell)}</td>")

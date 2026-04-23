@@ -123,14 +123,17 @@ def _font_name(bold: bool = False) -> str:
 
 
 def format_bill_message(bill: Bill) -> str:
-    """Render a bill as a plain-text Telegram message.
+    """Render a bill / quotation as a plain-text Telegram message.
 
-    Uses simple formatting that reads cleanly in a chat. Totals are
-    right-aligned with spaces because Markdown tables don't render in
-    Telegram native clients.
+    Branches on bill.document_type. Quotations omit the GST line from
+    the totals and add a footer noting that prices are exclusive of GST.
     """
+    is_quotation = bill.document_type == "quotation"
+    label = "Quotation" if is_quotation else "Bill"
+    icon = "📄" if is_quotation else "🧾"
+
     lines: list[str] = []
-    lines.append(f"🧾 *Bill {bill.bill_number}*")
+    lines.append(f"{icon} *{label} {bill.bill_number}*")
     lines.append(f"Date: {bill.bill_date.strftime('%d %b %Y, %I:%M %p')}")
     lines.append(f"Customer: *{bill.customer_name}*")
     lines.append("")
@@ -145,14 +148,20 @@ def format_bill_message(bill: Bill) -> str:
     if bill.transporter:
         lines.append(f"Transporter: {bill.transporter}")
     lines.append(f"Subtotal:   ₹{bill.subtotal:,.2f}")
-    lines.append(f"GST:        ₹{bill.tax_amount:,.2f}")
+    if not is_quotation:
+        lines.append(f"GST:        ₹{bill.tax_amount:,.2f}")
     if bill.bhada and bill.bhada > 0:
         lines.append(f"Bhada:      ₹{bill.bhada:,.2f}")
     lines.append(f"*Total:      ₹{bill.total:,.2f}*")
+    if is_quotation and bill.items:
+        gst_pct = bill.items[0].gst_rate
+        implied_gst = round(bill.subtotal * gst_pct / 100, 2)
+        lines.append(
+            f"_Prices exclusive of GST. If billed, GST @ {gst_pct:g}% "
+            f"would be approx ₹{implied_gst:,.2f}._"
+        )
     # Dalal/dalali intentionally not shown on the customer bill — broker
-    # context goes into a separate dalal memo (see format_dalal_memo_message
-    # / render_dalal_memo_pdf) that the shopkeeper keeps for broker
-    # reconciliation and does not share with the customer.
+    # context goes into a separate dalal memo.
     return "\n".join(lines)
 
 
@@ -183,15 +192,27 @@ def render_bill_pdf(bill: Bill, output_path: Path) -> Path:
         fontName=unicode_font, fontSize=10, alignment=2,
     )
 
+    is_quotation = bill.document_type == "quotation"
+    doc_label = "Quotation" if is_quotation else "Bill"
+
     elements: list = []
     elements.append(Paragraph(SHOP_NAME, title_style))
     elements.append(Paragraph(
         f"{SHOP_ADDRESS}<br/>Phone: {SHOP_PHONE}<br/>GSTIN: {SHOP_GSTIN}",
         small_style,
     ))
-    elements.append(Spacer(1, 5 * mm))
+    elements.append(Spacer(1, 3 * mm))
+    # Prominent doc-type badge so the customer can see at a glance
+    # whether they're looking at a quote or a booked invoice.
+    doc_badge_style = ParagraphStyle(
+        "doc_badge", parent=styles["Normal"],
+        fontName=unicode_font_bold, fontSize=11, alignment=1,
+        textColor=colors.white, backColor=colors.HexColor("#1a1a1a"),
+    )
+    elements.append(Paragraph(doc_label.upper(), doc_badge_style))
+    elements.append(Spacer(1, 3 * mm))
 
-    elements.append(Paragraph(f"<b>Bill:</b> {bill.bill_number}", small_style))
+    elements.append(Paragraph(f"<b>{doc_label}:</b> {bill.bill_number}", small_style))
     elements.append(Paragraph(
         f"<b>Date:</b> {bill.bill_date.strftime('%d %b %Y, %I:%M %p')}",
         small_style,
@@ -235,11 +256,12 @@ def render_bill_pdf(bill: Bill, output_path: Path) -> Path:
     elements.append(table)
     elements.append(Spacer(1, 5 * mm))
 
-    totals_data = [
-        ["Subtotal", f"₹ {bill.subtotal:,.2f}"],
-        [f"GST ({bill.items[0].gst_rate:g}%)" if bill.items else "GST",
-         f"₹ {bill.tax_amount:,.2f}"],
-    ]
+    totals_data = [["Subtotal", f"₹ {bill.subtotal:,.2f}"]]
+    if not is_quotation:
+        totals_data.append([
+            f"GST ({bill.items[0].gst_rate:g}%)" if bill.items else "GST",
+            f"₹ {bill.tax_amount:,.2f}",
+        ])
     if bill.bhada and bill.bhada > 0:
         totals_data.append(["Bhada (Freight)", f"₹ {bill.bhada:,.2f}"])
     totals_data.append(["Total", f"₹ {bill.total:,.2f}"])
@@ -254,11 +276,30 @@ def render_bill_pdf(bill: Bill, output_path: Path) -> Path:
     ]))
     elements.append(totals_table)
 
+    if is_quotation and bill.items:
+        gst_pct = bill.items[0].gst_rate
+        implied_gst = round(bill.subtotal * gst_pct / 100, 2)
+        quotation_note_style = ParagraphStyle(
+            "qnote", parent=styles["Normal"],
+            fontName=unicode_font, fontSize=8, leading=10,
+            textColor=colors.HexColor("#555555"),
+        )
+        elements.append(Spacer(1, 3 * mm))
+        elements.append(Paragraph(
+            f"<i>Prices exclusive of GST. If billed, GST @ {gst_pct:g}% would "
+            f"add approximately ₹ {implied_gst:,.2f}.</i>",
+            quotation_note_style,
+        ))
+
     elements.append(Spacer(1, 8 * mm))
-    elements.append(Paragraph(
-        "This is a system-generated bill. Thank you for your business.",
-        small_style,
-    ))
+    footer_text = (
+        "This quotation is a price estimate and not a booked transaction. "
+        "Rates valid for a reasonable period; confirm with the shop at "
+        "time of order."
+        if is_quotation else
+        "This is a system-generated bill. Thank you for your business."
+    )
+    elements.append(Paragraph(footer_text, small_style))
 
     doc.build(elements)
     return output_path
