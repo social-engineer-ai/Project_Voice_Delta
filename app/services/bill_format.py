@@ -8,6 +8,8 @@ software.
 """
 from __future__ import annotations
 
+import logging
+import platform
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -16,17 +18,108 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A5
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
 )
 
 from app.db.models import Bill, BillItem
 
+logger = logging.getLogger(__name__)
+
 
 SHOP_NAME = "ShopSaarthi Demo Shop"
 SHOP_ADDRESS = "Nagin Nagar, Indore, MP"
 SHOP_PHONE = "+91 90000 00000"
 SHOP_GSTIN = "23ABCDE1234F1Z5"
+
+
+# Font registration for Devanagari + Latin text.
+#
+# ReportLab's built-in Helvetica/Times fonts don't include Devanagari
+# glyphs, so ASR-produced Hindi names (e.g., "शर्मा जी", "राजेश") rendered
+# as black boxes on the PDF. We register a Unicode-capable font from
+# whichever source we can find: bundled first, then Windows system
+# fonts, then Linux/macOS paths. Falls back to Helvetica if nothing
+# works — at that point Devanagari still renders as black boxes but the
+# Latin parts of the bill stay readable.
+_UNICODE_FONT_NAME = "ShopSaarthiUnicode"
+_UNICODE_FONT_NAME_BOLD = "ShopSaarthiUnicode-Bold"
+_unicode_font_registered: bool | None = None
+
+
+def _register_unicode_font() -> bool:
+    """Try to register a Unicode font that supports Devanagari + Latin.
+    Returns True if the font was registered (or was already registered),
+    False if no suitable font found. Cached after first call."""
+    global _unicode_font_registered
+    if _unicode_font_registered is not None:
+        return _unicode_font_registered
+
+    # Candidate font sources, in priority order.
+    # TTC files use (path, subfontIndex) tuples — Nirmala.ttc index 0 is
+    # Nirmala UI Regular, index 1 is Nirmala UI Semilight.
+    candidates: list[tuple[str, Path, int | None, Path | None]] = []
+
+    # Windows: Nirmala UI (ships by default on Windows 8+).
+    if platform.system() == "Windows":
+        win_fonts = Path("C:/Windows/Fonts")
+        nirmala_ttc = win_fonts / "Nirmala.ttc"
+        if nirmala_ttc.exists():
+            candidates.append((
+                "Nirmala UI", nirmala_ttc, 0, None,
+            ))
+        mangal = win_fonts / "mangal.ttf"
+        if mangal.exists():
+            candidates.append(("Mangal", mangal, None, None))
+
+    # Linux: DejaVu Sans ships with most distros and supports Devanagari.
+    for p in (
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        Path("/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf"),
+    ):
+        if p.exists():
+            candidates.append((p.stem, p, None, None))
+
+    # macOS: ships with Kohinoor Devanagari.
+    for p in (
+        Path("/Library/Fonts/Kohinoor.ttc"),
+        Path("/System/Library/Fonts/Supplemental/Kohinoor.ttc"),
+    ):
+        if p.exists():
+            candidates.append((p.stem, p, 0, None))
+
+    for label, path, subfont_idx, _ in candidates:
+        try:
+            if subfont_idx is not None:
+                font = TTFont(_UNICODE_FONT_NAME, str(path), subfontIndex=subfont_idx)
+            else:
+                font = TTFont(_UNICODE_FONT_NAME, str(path))
+            pdfmetrics.registerFont(font)
+            logger.info(f"PDF unicode font registered: {label} from {path}")
+            _unicode_font_registered = True
+            # Don't fail if a bold variant isn't available — reportlab will
+            # fake bold by thickening strokes if we reference the regular name.
+            return True
+        except Exception as e:
+            logger.warning(f"Could not register {label} from {path}: {e}")
+
+    logger.warning(
+        "No Unicode font found for PDF rendering. Devanagari in bills "
+        "will render as black boxes. Install Nirmala UI / DejaVu Sans / "
+        "Noto Sans Devanagari."
+    )
+    _unicode_font_registered = False
+    return False
+
+
+def _font_name(bold: bool = False) -> str:
+    """Return the font name to use for bill text. Falls back to Helvetica
+    if the unicode font wasn't registered."""
+    if _register_unicode_font():
+        return _UNICODE_FONT_NAME  # reportlab fakes bold automatically
+    return "Helvetica-Bold" if bold else "Helvetica"
 
 
 def format_bill_message(bill: Bill) -> str:
@@ -64,15 +157,22 @@ def render_bill_pdf(bill: Bill, output_path: Path) -> Path:
         leftMargin=10 * mm, rightMargin=10 * mm,
     )
 
+    # Resolve the Unicode-capable font once per PDF.
+    unicode_font = _font_name()
+    unicode_font_bold = _font_name(bold=True)
+
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle(
-        "title", parent=styles["Heading1"], fontSize=14, alignment=1
+        "title", parent=styles["Heading1"],
+        fontName=unicode_font_bold, fontSize=14, alignment=1,
     )
     small_style = ParagraphStyle(
-        "small", parent=styles["Normal"], fontSize=8, leading=10
+        "small", parent=styles["Normal"],
+        fontName=unicode_font, fontSize=8, leading=10,
     )
     right_style = ParagraphStyle(
-        "right", parent=styles["Normal"], fontSize=10, alignment=2
+        "right", parent=styles["Normal"],
+        fontName=unicode_font, fontSize=10, alignment=2,
     )
 
     elements: list = []
@@ -108,10 +208,15 @@ def render_bill_pdf(bill: Bill, output_path: Path) -> Path:
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
         ("GRID", (0, 0), (-1, -1), 0.25, colors.black),
+        # Use the Unicode font across the whole table so product names in
+        # Devanagari render; the header row uses the same font name
+        # because reportlab fakes bold via synthetic emboldening when a
+        # bold variant isn't registered.
+        ("FONTNAME", (0, 0), (-1, -1), unicode_font),
+        ("FONTNAME", (0, 0), (-1, 0), unicode_font_bold),
         ("FONTSIZE", (0, 0), (-1, -1), 8),
         ("ALIGN", (2, 1), (-1, -1), "RIGHT"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
     ]))
     elements.append(table)
     elements.append(Spacer(1, 5 * mm))
@@ -124,9 +229,10 @@ def render_bill_pdf(bill: Bill, output_path: Path) -> Path:
     ]
     totals_table = Table(totals_data, hAlign="RIGHT", colWidths=[30 * mm, 30 * mm])
     totals_table.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -1), unicode_font),
+        ("FONTNAME", (0, -1), (-1, -1), unicode_font_bold),
         ("FONTSIZE", (0, 0), (-1, -1), 9),
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
         ("LINEABOVE", (0, -1), (-1, -1), 0.5, colors.black),
         ("TOPPADDING", (0, -1), (-1, -1), 3),
     ]))

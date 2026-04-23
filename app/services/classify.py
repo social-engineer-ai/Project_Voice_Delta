@@ -342,6 +342,22 @@ The shopkeeper will speak one of twelve kinds of commands, split into two groups
    extracted clearly, return intent=unknown instead — do not return
    intent=bill with null recipient_name or empty bill_items.
 
+   IMPORTANT FOR BILL: recipient_name and every bill_items[].product_name
+   must be written in LATIN SCRIPT (English transliteration), even when
+   the input transcript is in Devanagari. The printed bill and the Tally
+   export expect Latin text. Examples of the required transliteration:
+     Input token     -> Required output
+     "शर्मा जी"       -> "Sharma ji"
+     "राजेश"          -> "Rajesh"
+     "रामू भैया"      -> "Ramu bhaiya"
+     "डेट अजवा"       -> "Date Ajwa"
+     "क्राउन फर्द"    -> "Crown Fard"
+     "50 बोरी"        -> unit="bori", quantity=50
+   Standard Hinglish transliteration is fine; do not translate, just
+   write the Hindi-pronounced name using Latin letters. This rule
+   applies ONLY to bill intent; other intents keep the existing
+   "return names exactly as spoken" rule.
+
    Extract the customer name into recipient_name, and each line item
    into bill_items[] with product_name, quantity, unit, rate. Maximum
    3 items per command. Numbers spoken as Hindi ("paanch", "das") or
