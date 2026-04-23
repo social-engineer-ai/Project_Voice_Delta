@@ -124,16 +124,23 @@ async def handle_bill_intent(
     """
     transcript = context.user_data.get("last_transcript", "")
 
+    # User-facing error messages include both Hinglish (CLAUDE.md default)
+    # and Devanagari, separated by a blank line. Convention local to this
+    # handler for the Dates branch demo — the target audience reads both.
     if not intent.recipient_name:
         await update.message.reply_text(
             "Customer ka naam samajh nahi aaya. Dobara boliye, jaise "
-            "'Rajesh ke liye 5 carton Date crown fard bill banao, rate 3000'."
+            "'Rajesh ke liye 5 carton Date Crown Fard bill banao, rate 3000'.\n\n"
+            "ग्राहक का नाम समझ नहीं आया। दोबारा बोलिए, जैसे "
+            "'राजेश के लिए 5 कार्टन डेट क्राउन फर्द बिल बनाओ, रेट 3000'।"
         )
         return
     if not intent.bill_items:
         await update.message.reply_text(
             "Bill ke items samajh nahi aaye. Product, quantity aur rate "
-            "clearly bolke dobara bhejiye."
+            "clearly bolke dobara bhejiye.\n\n"
+            "बिल के items समझ नहीं आए। Product, quantity और rate साफ-साफ "
+            "बोलकर दोबारा भेजिए।"
         )
         return
 
@@ -143,7 +150,9 @@ async def handle_bill_intent(
         if not items:
             await update.message.reply_text(
                 "Items mein kuch kami hai (product, quantity, ya rate "
-                "missing). Dobara boliye."
+                "missing). Dobara boliye.\n\n"
+                "Items में कुछ कमी है (product, quantity, या rate missing)। "
+                "दोबारा बोलिए।"
             )
             return
 
@@ -213,7 +222,8 @@ async def handle_bill_intent(
     except Exception as e:
         logger.exception(f"Bill handler failed: {e}")
         await update.message.reply_text(
-            "Bill banane mein dikkat hui. Dobara try kariye."
+            "Bill banane mein dikkat hui. Dobara try kariye.\n\n"
+            "बिल बनाने में दिक्कत हुई। दोबारा try कीजिए।"
         )
     finally:
         db.close()
